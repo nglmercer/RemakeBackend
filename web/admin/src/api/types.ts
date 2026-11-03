@@ -122,6 +122,82 @@ export interface PublisherMember {
   role: string
 }
 
+export interface PublisherTransfer {
+  id: string
+  offeredBy: string
+  recipientUserId: string
+}
+
+export interface ReleaseAdvisory {
+  severity: string
+  message: string
+  url: string | null
+}
+
+export interface ReleaseModeration {
+  decision: string
+  reasonCode: string
+}
+
+export interface ReleaseVerification {
+  status: string
+  resultClass: string | null
+}
+
+export interface PublisherRelease {
+  id: string
+  publisherId: string
+  uploadId: string
+  publisherKeyId: string
+  pluginId: string
+  version: string
+  target: string
+  status: string
+  sha256: string
+  size: number
+  keyId: string
+  keyFingerprint: string
+  yanked: boolean
+  yankReason: string | null
+  advisory: ReleaseAdvisory | null
+  moderation: ReleaseModeration | null
+  verification: ReleaseVerification | null
+}
+
+export interface PublisherReleasePage {
+  items: PublisherRelease[]
+  nextCursor: string | null
+}
+
+export interface UploadReservation {
+  id: string
+  url: string
+  headers: Record<string, string>
+  expiresIn: number
+}
+
+export interface ReleaseReview {
+  decision: string
+  reasonCode: string
+  yanked: boolean
+  yankReason: string | null
+  advisory: ReleaseAdvisory | null
+}
+
+export type PublisherRole = 'owner' | 'admin' | 'publisher' | 'viewer'
+
+export function canPublish(role: string): boolean {
+  return role === 'owner' || role === 'admin' || role === 'publisher'
+}
+
+export function canManageMembers(role: string): boolean {
+  return role === 'owner'
+}
+
+export function canManageKeys(role: string): boolean {
+  return role === 'owner' || role === 'admin'
+}
+
 export function isCloudAdmin(me: Me | null | undefined): boolean {
   return me?.roles.includes('admin') ?? false
 }
