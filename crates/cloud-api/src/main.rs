@@ -6,6 +6,7 @@ mod moderation;
 mod publication;
 mod publication_worker;
 mod publisher_keys;
+mod publisher_releases;
 mod publishers;
 mod readiness;
 mod recovery;
@@ -756,6 +757,10 @@ fn app_inner(
         )
         .route("/api/v1/publishers/{id}/members", get(publishers::members))
         .route(
+            "/api/v1/publishers/{id}/releases",
+            get(publisher_releases::list).layer(axum::middleware::map_response(sync::no_store)),
+        )
+        .route(
             "/api/v1/publishers/{id}/members/{user_id}",
             axum::routing::put(publishers::set_member).delete(publishers::remove_member),
         )
@@ -975,6 +980,8 @@ async fn proxy_boundary(
 
 #[cfg(test)]
 mod auth_tests;
+#[cfg(test)]
+mod portal_tests;
 #[cfg(test)]
 mod registry_tests;
 #[cfg(test)]

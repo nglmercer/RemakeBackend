@@ -186,6 +186,30 @@ cookie sessions only.
 
 Admin web foundation and read APIs: `GET /api/v1/admin/overview` (publisher/release/status counts, pending keys, audit total), `GET /api/v1/admin/publishers?status=&cursor=&limit=` (oldest-first keyset pages of id/namespace/status/createdAt, no user secrets), and `GET /api/v1/admin/audit?cursor=&limit=` (newest-first redacted projection: opaque IDs, actions, role names, links only) are Cloud-admin-gated with `no-store` on every route. PostgreSQL integration coverage asserts anonymous 401, non-admin 403, malicious filters/cursors/limits failing closed with 400, cursor pagination without repeats, exact audit key sets with no secret-bearing fields, and revocation taking effect immediately. `web/admin/` is a Vite + Vue 3 + TypeScript app (Vue Router, TanStack Query, Pinia for client-only UI state, ES/EN i18n) with `/login`, `/auth/callback`, `/app` (dashboard, publishers, moderation, audit, portal, account), `/403`, and `/logout`; cookie sessions only, CSRF via Better Auth endpoints, no tokens in web storage (asserted by a storage spy test), and key enrollment/approval reauthenticate through a step-up dialog (password or Google) before spending single-use grants. Frontend checks: `npm run build` (vue-tsc + vite), `npm test` (12 vitest cases), and a Playwright cookie/CSRF spec against the real server. Deployment hardening is documented in `docs/ADMIN-WEB-DEPLOYMENT.md` with an example single-origin nginx config in `deploy/admin-reverse-proxy.example.conf`. Real-browser E2E, real Google OAuth, production proxy deployment, and independent security review remain outstanding.
 
+Publisher self-service portal verification on 2026-11-03:
+`GET /api/v1/publishers/{id}/releases` lists a member publisher's releases
+newest-first with keyset cursor pagination, joining upload digests/sizes,
+key identity, yank/advisory state, moderation decisions, and verification job
+status; non-members and members of other publishers get 404, unknown cursors
+and out-of-range limits get 400, and every route carries `no-store`. The Vue
+portal now requests namespaces, renders pending/approved/suspended states,
+manages members (owner-only role changes and removals, self leave with an
+owner-transfer guard), drives ownership offers/accepts/cancels, lists signing
+keys with fingerprint and status plus confirmed revocation, and submits signed
+releases through a validated wizard (approved publisher and key selection,
+local ZIP/size/SHA-256 checks, idempotent reservation, direct-to-quarantine
+PUT, version-pinned completion, metadata submission) with distinct
+expired-URL, failure, and retry states in English and Spanish. New PostgreSQL
+integration tests cover listing scope/pagination/composed fields, expired
+reservation completion (410), and revoked-key submission refusal; new vitest
+cases cover namespace validation, member/key management gating, release
+rendering and pagination, and the full wizard order plus local validation and
+expired-URL recovery. `cargo fmt`, `cargo clippy -- -D warnings`,
+`cargo test --workspace --locked`, `npm ci`, `npm run typecheck`,
+`npm test` (38 cases), and `npm run build` passed; new database tests ran
+against a disposable local pgrust database. Real storage, real browser E2E,
+and publication remain unverified here. See PUBLISHER-PORTAL.md.
+
 Registry publication verification on 2026-11-03:
 Persistent generations (`cloud_registry_generations`, `_releases`, `_files`,
 `_promotions`) track published snapshots, immutable versioned artifacts,
