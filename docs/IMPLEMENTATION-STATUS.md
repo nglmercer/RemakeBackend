@@ -185,3 +185,30 @@ Native (Bearer) deletion is not implemented because the library flow resolves
 cookie sessions only.
 
 Admin web foundation and read APIs: `GET /api/v1/admin/overview` (publisher/release/status counts, pending keys, audit total), `GET /api/v1/admin/publishers?status=&cursor=&limit=` (oldest-first keyset pages of id/namespace/status/createdAt, no user secrets), and `GET /api/v1/admin/audit?cursor=&limit=` (newest-first redacted projection: opaque IDs, actions, role names, links only) are Cloud-admin-gated with `no-store` on every route. PostgreSQL integration coverage asserts anonymous 401, non-admin 403, malicious filters/cursors/limits failing closed with 400, cursor pagination without repeats, exact audit key sets with no secret-bearing fields, and revocation taking effect immediately. `web/admin/` is a Vite + Vue 3 + TypeScript app (Vue Router, TanStack Query, Pinia for client-only UI state, ES/EN i18n) with `/login`, `/auth/callback`, `/app` (dashboard, publishers, moderation, audit, portal, account), `/403`, and `/logout`; cookie sessions only, CSRF via Better Auth endpoints, no tokens in web storage (asserted by a storage spy test), and key enrollment/approval reauthenticate through a step-up dialog (password or Google) before spending single-use grants. Frontend checks: `npm run build` (vue-tsc + vite), `npm test` (12 vitest cases), and a Playwright cookie/CSRF spec against the real server. Deployment hardening is documented in `docs/ADMIN-WEB-DEPLOYMENT.md` with an example single-origin nginx config in `deploy/admin-reverse-proxy.example.conf`. Real-browser E2E, real Google OAuth, production proxy deployment, and independent security review remain outstanding.
+
+Registry publication verification on 2026-11-03:
+Persistent generations (`cloud_registry_generations`, `_releases`, `_files`,
+`_promotions`) track published snapshots, immutable versioned artifacts,
+candidate-to-generation mapping, manifest hashes, and promotion/rollback/GC
+history with operator identity. `snapshot_publish::publish` promotes a
+verified candidate to a new generation after rechecking manifest/inventory
+hashes, publisher/key authorization, moderation, yanks, advisories,
+signatures, object versions, digests, and the current root/delegated policy
+under an advisory lock; the active pointer flips atomically and reruns are
+idempotent. `rollback` restores only generations that revalidate against
+current trust and security state and refuses compromised, revoked, yanked, or
+stale targets. `gc` collects staged leftovers, redundant published candidate
+files, and consumed staging originals with a per-run bound. Public routes
+serve the registry without Cloud authentication (`/current` uncached,
+generation files immutable with ETags). New pgrust integration tests
+(`registry_tests`, 10 cases) cover initial and incremental publication,
+concurrency, changed authorization, revoked keys, yanked releases and
+advisories, corrupt and forged artifacts, interrupted-upload resume, atomic
+switching and caches, restart recovery, safe/unsafe rollback, GC, and real
+TikTools registry-client compatibility (refresh, discover, download, offline
+signature verification, install, update, yank removal, wrong-root and
+digest-mismatch rejection). `cargo fmt`, `cargo clippy -D warnings`,
+`cargo test --workspace --locked` (excluding ignored), and the 10 ignored
+database tests on a disposable local pgrust passed; web code is untouched by
+this branch. Real S3/ClamAV, Cloud authentication for operator commands, and
+production trust/deployment remain unverified. See REGISTRY-OPERATIONS.md.

@@ -246,7 +246,44 @@ impl QuarantineStore {
         size: i64,
         sha256: &str,
     ) -> Result<(String, ObjectVersion), StorageError> {
-        if !(1..=MAX_ARTIFACT_SIZE).contains(&size)
+        self.stage_under(
+            &format!("prepared/{publisher}/{attempt}"),
+            path,
+            size,
+            sha256,
+        )
+        .await
+    }
+
+    /// Store an independently verified public registry file under a fresh
+    /// server-generated key inside one immutable generation, then read the
+    /// exact returned version back and verify size and digest. Published files
+    /// are immutable: the generation directory is never modified in place.
+    pub async fn stage_public_file(
+        &self,
+        generation: Uuid,
+        path: &Path,
+        size: i64,
+        sha256: &str,
+    ) -> Result<(String, ObjectVersion), StorageError> {
+        self.stage_under(
+            &format!("public/{generation}/{}", Uuid::new_v4()),
+            path,
+            size,
+            sha256,
+        )
+        .await
+    }
+
+    async fn stage_under(
+        &self,
+        key: &str,
+        path: &Path,
+        size: i64,
+        sha256: &str,
+    ) -> Result<(String, ObjectVersion), StorageError> {
+        if !(valid_prepared_key(key) || valid_public_key(key))
+            || !(1..=MAX_ARTIFACT_SIZE).contains(&size)
             || sha256.len() != 64
             || !sha256
                 .bytes()
@@ -261,7 +298,6 @@ impl QuarantineStore {
             return Err(StorageError::InvalidObject);
         }
         self.require_versioning().await?;
-        let key = format!("prepared/{publisher}/{attempt}");
         let checksum = STANDARD.encode(hex::decode(sha256).map_err(|_| StorageError::Invalid)?);
         let body = ByteStream::from_path(path)
             .await
@@ -270,7 +306,7 @@ impl QuarantineStore {
             .client
             .put_object()
             .bucket(&self.bucket)
-            .key(&key)
+            .key(key)
             .content_length(size)
             .checksum_sha256(checksum)
             .if_none_match("*")
@@ -284,9 +320,31 @@ impl QuarantineStore {
             .ok_or(StorageError::InvalidObject)?
             .to_owned();
         let version = ObjectVersion { version_id, size };
-        self.download_version(&key, &version, sha256, tokio::io::sink())
+        self.download_version(key, &version, sha256, tokio::io::sink())
             .await?;
-        Ok((key, version))
+        Ok((key.to_owned(), version))
+    }
+
+    /// Delete one exact version. Used only by bounded registry garbage
+    /// collection for versions no generation or promotable candidate needs.
+    pub async fn delete_version(&self, key: &str, version_id: &str) -> Result<(), StorageError> {
+        if !(valid_key(key) || valid_prepared_key(key) || valid_public_key(key))
+            || version_id.is_empty()
+            || version_id == "null"
+            || version_id.len() > 1024
+        {
+            return Err(StorageError::Invalid);
+        }
+        self.require_versioning().await?;
+        self.client
+            .delete_object()
+            .bucket(&self.bucket)
+            .key(key)
+            .version_id(version_id)
+            .send()
+            .await
+            .map_err(|_| StorageError::Unavailable)?;
+        Ok(())
     }
 
     /// Stream a captured version to a private temporary sink and verify its digest.
@@ -298,7 +356,7 @@ impl QuarantineStore {
         expected_sha256: &str,
         mut output: W,
     ) -> Result<(), StorageError> {
-        if !(valid_key(key) || valid_prepared_key(key))
+        if !(valid_key(key) || valid_prepared_key(key) || valid_public_key(key))
             || !(1..=MAX_ARTIFACT_SIZE).contains(&version.size)
             || version.version_id.is_empty()
             || version.version_id == "null"
@@ -396,6 +454,10 @@ fn valid_key(key: &str) -> bool {
 fn valid_prepared_key(key: &str) -> bool {
     let mut parts = key.split('/');
     matches!((parts.next(),parts.next(),parts.next(),parts.next()),(Some("prepared"),Some(a),Some(b),None) if Uuid::parse_str(a).is_ok() && Uuid::parse_str(b).is_ok())
+}
+fn valid_public_key(key: &str) -> bool {
+    let mut parts = key.split('/');
+    matches!((parts.next(),parts.next(),parts.next(),parts.next()),(Some("public"),Some(a),Some(b),None) if Uuid::parse_str(a).is_ok() && Uuid::parse_str(b).is_ok())
 }
 fn valid_bucket(bucket: &str) -> bool {
     (3..=63).contains(&bucket.len())

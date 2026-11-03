@@ -13,11 +13,69 @@ On a trusted development machine, check out that exact TikTools revision and run
 - Keep the index key in a restricted signing environment backed by KMS/HSM where supported; the upstream CLI currently accepts a local key file, so a secure production signing integration remains to be built and audited. Limit who can invoke it, require approval, log signer identity and artifact digest, and rotate it via a root-signed delegation before expiration. Revoke compromised delegated keys and affected digests promptly; publish a new signed snapshot and notify clients.
 - Root rotation requires a Desktop update with an independently authenticated new pin, an overlap and recovery plan, and coordinated retirement of the old root. Do not replace `root.json` and expect existing pinned clients to trust it. Test recovery and compromise procedures before launch.
 
-## Snapshot publication and rollback (design; not implemented)
+## Snapshot publication and rollback
 
-Build the entire snapshot in an isolated staging location with the upstream CLI. Check all signatures, delegated scopes, package digests and install behavior using a real client pinned to the intended root. Publish immutable versioned objects first; verify that every object and detached signature is reachable. Promote the complete tree atomically through infrastructure that guarantees the client sees a consistent snapshot, accounting for CDN cache behavior. The protocol has no built-in snapshot pointer or cross-document atomicity guarantee; the deployment mechanism and its proof still need implementation. Do not upload files one by one over a live tree and call that atomic.
+Generations are immutable full snapshots served at `GET
+/api/v1/registry/generations/{generation}/files/{path}` with immutable
+caching, and `GET /api/v1/registry/current` is the atomic pointer the v1
+protocol lacks (never cached). Each new generation preserves the previously
+published releases and adds newly prepared ones; generations are never rebuilt
+as empty registries. Files are never published one by one into a live tree.
+Promotion, rollback, GC, and listing run through operator-owned CLI commands
+that take an explicit operator label (`publish-generation CANDIDATE_ID
+OPERATOR`, `rollback-generation GENERATION OPERATOR`, `gc-registry-artifacts
+LIMIT OPERATOR`, `list-generations`); every decision, failure, and recovery is
+audited with that identity.
 
-Retain previous immutable snapshots and record their hashes and approvals. Roll back only to a fully verified snapshot compatible with current pins and security state; never restore a compromised key, revoked digest, yanked release, or stale advisory merely to recover availability. Rebuild and sign a corrected snapshot if necessary. Test promotion, cache behavior, rollback, signing credential rotation and restore in staging before production use. The fixture workflow is not a production publication workflow.
+Promotion is fail-closed. A `verified` readiness record is evidence, never
+authorization: promotion rechecks the exact manifest and inventory hashes,
+current publisher/key authorization, moderation decisions, yanks, key
+revocations, and advisories, revalidates signatures against the current root
+and delegated policy, rescans and reverifies every artifact by pinned object
+version, and serializes promoters on an advisory lock. Anything changed since
+verification aborts with a `blocked` record; infrastructure failures record
+`failed`. Concurrent promotions fail fast instead of interleaving, and the
+active pointer flips in one transaction, so clients never observe a mixed
+snapshot. Re-running promotion for the same candidate is idempotent: an
+already-active generation returns as-is, and an interrupted staged generation
+resumes instead of duplicating.
+
+Rollback restores a previously live generation only after re-downloading every
+file by pinned version, digest-checking it, revalidating the tree against the
+current pins, rechecking current publisher/key authorization, yanks,
+advisories, and revocations, and rescanning the packages. A target carrying a
+compromised key, revoked digest, yanked release, or stale advisory is refused
+with a `blocked` record; rebuild and promote a corrected generation instead.
+Superseded generations stay readable as rollback targets and pinned clients
+keep working; `gc-registry-artifacts` only collects staged leftovers older
+than one hour, published candidates' redundant staging files, and consumed
+staging originals, bounded per run.
+
+Public downloads need no Cloud authentication and stay offline-verifiable:
+clients pin the root, refresh, discover, download by digest, verify publisher
+signatures, and install through the pinned TikTools client. The integration
+suite proves this against the real served routes, including update discovery,
+yank removal, wrong-root rejection, and digest-mismatch rejection.
+
+## Staging registry runbook
+
+Development uses disposable keys and a local staging registry; staging trust
+material is never a production anchor. Generate a root, an index key, and a
+publisher key on a trusted machine, build a seed directory with
+`IndexWriter::init`, and pass it through `SNAPSHOT_SEED_DIR`,
+`SNAPSHOT_ROOT_PIN_FILE`, and `SNAPSHOT_INDEX_KEY_FILE` (or the equivalent
+`*_B64` variables) with the usual `CLOUD_*` storage and `CLAMAV_ADDR`
+settings. Run `build-initial-candidate`, `verify-candidate`,
+`check-promotion-readiness`, then `publish-generation`; confirm
+`/api/v1/registry/current` advances and the files serve with immutable cache
+headers. Serve the API over loopback HTTP and point the pinned TikTools client
+at `/api/v1/registry/generations/{n}/files` to rehearse discovery, download,
+verification, install, update, and yank removal. Production promotion stays
+disabled until official trust material (offline root ceremony, KMS/HSM-backed
+index key, independently authenticated client pins), authorized operators, and
+the reviewed deployment infrastructure are provisioned; until then, staging
+keys and local runs are the only supported path, and no staging artifact may
+be presented as an official release.
 
 ## Publication requests
 

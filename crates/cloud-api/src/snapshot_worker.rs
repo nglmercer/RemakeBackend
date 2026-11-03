@@ -68,7 +68,7 @@ pub fn inputs_from_env() -> Result<Inputs> {
 #[derive(Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct Item {
     pub(crate) job: Uuid,
-    publisher: Uuid,
+    pub(crate) publisher: Uuid,
     pub(crate) namespace: String,
     pub(crate) plugin_id: String,
     pub(crate) version: String,
@@ -78,9 +78,9 @@ pub(crate) struct Item {
     pub(crate) prepared_key: String,
     pub(crate) prepared_version: String,
     pub(crate) key_id: String,
-    public_key: String,
-    requester: String,
-    revisions: Vec<String>,
+    pub(crate) public_key: String,
+    pub(crate) requester: String,
+    pub(crate) revisions: Vec<String>,
     pub(crate) advisory: Option<AdvisoryRecord>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]

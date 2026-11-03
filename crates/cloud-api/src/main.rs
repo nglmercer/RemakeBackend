@@ -13,6 +13,7 @@ mod releases;
 mod scanner;
 mod snapshot_export;
 mod snapshot_promotion;
+mod snapshot_publish;
 mod snapshot_verify;
 mod snapshot_worker;
 mod step_up;
@@ -294,6 +295,122 @@ async fn main() -> Result<(), Box<dyn Error>> {
             return Ok(());
         }
     }
+    if args == ["list-generations"] {
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&config.database_url)
+            .await?;
+        let generations = snapshot_publish::list(&pool).await?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&generations).map_err(|e| e.to_string())?
+        );
+        return Ok(());
+    }
+    if let [command, candidate, operator] = args.as_slice() {
+        if command == "publish-generation" {
+            let id = uuid::Uuid::parse_str(candidate)?;
+            let storage_config = config
+                .object_storage
+                .ok_or("object storage must be configured")?;
+            let store = cloud_storage::QuarantineStore::new(storage_config)?;
+            let pool = PgPoolOptions::new()
+                .max_connections(5)
+                .connect(&config.database_url)
+                .await?;
+            let scanner = scanner::ClamAv::new(
+                config
+                    .clamav_addr
+                    .ok_or("CLAMAV_ADDR must be configured for publication")?,
+            );
+            let inputs = snapshot_worker::inputs_from_env()?;
+            let published =
+                snapshot_publish::publish(&pool, &store, &scanner, &inputs, id, operator).await?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "id": published.id,
+                    "generation": published.generation,
+                    "manifestSha256": published.manifest_sha256,
+                    "releaseCount": published.release_count,
+                    "fileCount": published.file_count,
+                    "dropped": published.dropped,
+                }))
+                .map_err(|e| e.to_string())?
+            );
+            tracing::info!(candidate_id=%id, generation = published.generation, "registry generation promoted and activated");
+            return Ok(());
+        }
+        if command == "rollback-generation" {
+            let generation: i64 = candidate
+                .parse()
+                .map_err(|_| "generation must be a positive integer")?;
+            let pool = PgPoolOptions::new()
+                .max_connections(5)
+                .connect(&config.database_url)
+                .await?;
+            let storage_config = config
+                .object_storage
+                .ok_or("object storage must be configured")?;
+            let store = cloud_storage::QuarantineStore::new(storage_config)?;
+            let scanner = scanner::ClamAv::new(
+                config
+                    .clamav_addr
+                    .ok_or("CLAMAV_ADDR must be configured for rollback")?,
+            );
+            let inputs = snapshot_worker::inputs_from_env()?;
+            let index_pub = inputs.index.public_key();
+            let seed = inputs.seed.clone();
+            let root = inputs.root.clone();
+            let rolled = snapshot_publish::rollback(
+                &pool, &store, &scanner, &seed, &root, &index_pub, generation, operator,
+            )
+            .await?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "id": rolled.id,
+                    "generation": rolled.generation,
+                    "previous": rolled.previous,
+                }))
+                .map_err(|e| e.to_string())?
+            );
+            tracing::info!(
+                generation = rolled.generation,
+                previous = rolled.previous,
+                "registry generation restored"
+            );
+            return Ok(());
+        }
+    }
+    if let [command, limit, operator] = args.as_slice() {
+        if command == "gc-registry-artifacts" {
+            let limit: i64 = limit
+                .parse()
+                .map_err(|_| "gc limit must be an integer between 1 and 1000")?;
+            let pool = PgPoolOptions::new()
+                .max_connections(2)
+                .connect(&config.database_url)
+                .await?;
+            let storage_config = config
+                .object_storage
+                .ok_or("object storage must be configured")?;
+            let store = cloud_storage::QuarantineStore::new(storage_config)?;
+            let report = snapshot_publish::gc(&pool, &store, limit, operator).await?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "deletedFiles": report.deleted_files,
+                    "deletedGenerations": report.deleted_generations,
+                    "deletedCandidateFiles": report.deleted_candidate_files,
+                    "deletedPrepared": report.deleted_prepared,
+                }))
+                .map_err(|e| e.to_string())?
+            );
+            tracing::info!("registry gc completed");
+            return Ok(());
+        }
+    }
     if let [command, candidate, destination] = args.as_slice() {
         if command == "export-candidate" {
             let id = uuid::Uuid::parse_str(candidate)?;
@@ -355,7 +472,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
     if !args.is_empty() {
-        return Err("usage: cloud-api [migrate | verify-once | prepare-publication-once | build-initial-candidate | export-candidate ID OUTPUT_DIR | verify-candidate ID | list-promotion-checks ID | check-promotion-readiness ID OPERATOR | retry-verification UPLOAD_ID OPERATOR | retry-publication JOB_ID OPERATOR | grant-role USER ROLE OPERATOR | revoke-role USER ROLE OPERATOR]".into());
+        return Err("usage: cloud-api [migrate | verify-once | prepare-publication-once | build-initial-candidate | export-candidate ID OUTPUT_DIR | verify-candidate ID | list-promotion-checks ID | check-promotion-readiness ID OPERATOR | publish-generation CANDIDATE_ID OPERATOR | rollback-generation GENERATION OPERATOR | list-generations | gc-registry-artifacts LIMIT OPERATOR | retry-verification UPLOAD_ID OPERATOR | retry-publication JOB_ID OPERATOR | grant-role USER ROLE OPERATOR | revoke-role USER ROLE OPERATOR]".into());
     }
     let mut auth = configured_auth_router(context.clone())?;
     let mut step_up_oauth = None;
@@ -572,6 +689,14 @@ fn app_inner(
             axum::routing::post(uploads::complete)
                 .layer(axum::extract::DefaultBodyLimit::max(4096))
                 .layer(axum::middleware::map_response(sync::no_store)),
+        )
+        .route(
+            "/api/v1/registry/current",
+            get(snapshot_publish::current).layer(axum::middleware::map_response(sync::no_store)),
+        )
+        .route(
+            "/api/v1/registry/generations/{generation}/files/{*path}",
+            get(snapshot_publish::file),
         )
         .route(
             "/api/v1/publishers",
@@ -850,5 +975,7 @@ async fn proxy_boundary(
 
 #[cfg(test)]
 mod auth_tests;
+#[cfg(test)]
+mod registry_tests;
 #[cfg(test)]
 mod step_up_tests;
