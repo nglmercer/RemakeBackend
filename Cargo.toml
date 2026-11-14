@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/cloud-api", "crates/cloud-contracts", "crates/cloud-verifier", "crates/cloud-client", "crates/cloud-storage", "crates/cloud-snapshot", "crates/devtools-core", "crates/devtools", "crates/cloud-peer-relay"]
+members = ["crates/cloud-api", "crates/cloud-contracts", "crates/cloud-verifier", "crates/cloud-client", "crates/cloud-storage", "crates/cloud-snapshot", "crates/devtools-core", "crates/devtools", "crates/cloud-peer-relay", "crates/cloud-versioning"]
 
 # Password hashing (better-auth uses scrypt with a 32 MiB work factor) dominates
 # the database test suite when compiled without optimizations: every sign-up
@@ -19,3 +19,10 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.password-hash]
 opt-level = 3
+
+# Lore's workspace patches two crates that Cargo does not apply from a dependency's own
+# workspace, so the consuming workspace repeats them, at the same Lore revision as the
+# dependency in crates/cloud-versioning. See docs/VERSIONING-BUILD.md.
+[patch.crates-io]
+quinn-proto = { git = "https://github.com/nglmercer/lore.git", rev = "085eccbe4845890c51b6021db32390051d948ae0" }
+glob-match = { git = "https://github.com/nglmercer/lore.git", rev = "085eccbe4845890c51b6021db32390051d948ae0" }

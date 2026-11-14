@@ -1,4 +1,14 @@
-# Only an alias: `cargo remake db up` == `cargo run -q -p devtools -- db up`.
-# Nothing here touches rustflags, linkers, wrappers or target directories.
+# `cargo remake db up` == `cargo run -q -p devtools -- db up`.
 [alias]
 remake = "run -q -p devtools --"
+
+# Required by the embedded Lore engine (crates/cloud-versioning); Lore's own workspace sets
+# the same cfgs in its .cargo/config.toml, and Cargo does not apply a dependency's config to
+# its consumer:
+#  - tokio_unstable: tokio runtime metrics that lore-server's telemetry reads.
+#  - uuid_unstable: the zerocopy trait impls for `Uuid` that Lore's wire headers derive on.
+# Both cfgs only enable extra APIs, so they do not change the behavior of other crates here.
+# They apply to the whole workspace because Cargo has no stable per-package rustflags, which
+# means the first build after this change recompiles every dependency.
+[build]
+rustflags = ["--cfg", "tokio_unstable", "--cfg", "uuid_unstable"]

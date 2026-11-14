@@ -1,0 +1,18 @@
+[package]
+name = "cloud-versioning"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+license = "MIT"
+description = "Embeds the Lore versioning engine in RemakeBackend and adapts RemakeBackend identity and policy to it."
+
+[dependencies]
+# Pinned to a revision of the nglmercer/lore fork (branch remake/embedding). Update the rev
+# together with the [patch.crates-io] revs in the root Cargo.toml; see docs/VERSIONING-BUILD.md.
+lore-server = { git = "https://github.com/nglmercer/lore.git", rev = "085eccbe4845890c51b6021db32390051d948ae0" }
+anyhow = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
