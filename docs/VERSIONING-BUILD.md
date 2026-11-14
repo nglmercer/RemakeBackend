@@ -14,7 +14,7 @@ and what is and is not implemented. It is the working record for the implementat
 
 The fork is `https://github.com/nglmercer/lore`, branch `remake/embedding`, with the remote
 `upstream` pointing at `EpicGames/lore` in the local checkout. RemakeBackend pins fork revision
-`085eccbe4845890c51b6021db32390051d948ae0` (the embedding commit, one commit above the baseline).
+`603fa111939fab8f560d0e6c97dd27a50f73474a` (the embedding commit, one commit above the baseline).
 
 ## Build layout
 
@@ -23,11 +23,11 @@ Lore's two workspace patches from the same revision, because Cargo does not appl
 own `[patch]` section to its consumer:
 
 ```toml
-lore-server = { git = "https://github.com/nglmercer/lore.git", rev = "085eccbe..." }
+lore-server = { git = "https://github.com/nglmercer/lore.git", rev = "603fa111..." }
 
 [patch.crates-io]
-quinn-proto = { git = "https://github.com/nglmercer/lore.git", rev = "085eccbe..." }
-glob-match = { git = "https://github.com/nglmercer/lore.git", rev = "085eccbe..." }
+quinn-proto = { git = "https://github.com/nglmercer/lore.git", rev = "603fa111..." }
+glob-match = { git = "https://github.com/nglmercer/lore.git", rev = "603fa111..." }
 ```
 
 Cargo finds `lore-server` and the two vendored crates inside the repository by package name.
@@ -55,7 +55,7 @@ ahead of the baseline (both in `lore-revision`) when the fork was made.
 
 ## What exists
 
-Lore fork (`nglmercer/lore`, branch `remake/embedding`, commit `085eccbe`):
+Lore fork (`nglmercer/lore`, branch `remake/embedding`, commit `603fa111`):
 
 - `lore_server::server::EmbeddedServer`: starts the server inside a host runtime, leaves the
   tracing subscriber and process signals to the host, serves until stopped, and restarts in the
@@ -111,3 +111,23 @@ than "Embedded lifecycle" has been run.
 8. **Commit policy differs between the repositories.** Lore's `lore-development` skill forbids
    authorship/tool attribution lines and requires DCO sign-off, so the fork commit is signed off
    and carries no attribution. RemakeBackend has no such rule.
+
+## Viability spike (Lore CLI against the embedded engine)
+
+Run with `crates/cloud-versioning/examples/serve*.rs` and the Lore CLI, over loopback, in a debug
+build. Results:
+
+| Check | Result |
+| --- | --- |
+| create, stage, commit, push, clone in a second copy | Works over QUIC (`lore://`); bytes identical. |
+| Two writers from the same head | The second push fails with `Branch has diverged`; neither side loses work. |
+| Restart with history | Survives a graceful stop. |
+| `SIGKILL` right after an acknowledged push | **Lost** with Lore's default flush delay; survives after the `[server] durable_publication = true` fork change (2/2). Survives a kill 14 s later without it. |
+| 1 GiB file | Push 5 s, clone 19 s, SHA-256 identical. Server peak RSS 327 MB (push) and 824 MB (clone) against a 253 MB baseline; the clone figure may include mapped store pages and needs a proper measurement before promising a memory budget. |
+| Authenticated native endpoints | The server starts with `[server.auth]` + `external_credentials`, verifying Ed25519 JWTs from the bridge's key set. **Not yet passing:** `repository create` with a valid service token answers `Not authenticated: authorization header required`, so the CLI does not send `--access-token` on this call, or expects the identity-token exchange. Isolation, read-only and tampered-token cases are scripted but unproven. |
+
+Verdict so far: the transport, conflict detection, history, large-file and durability behavior are
+viable on the embedded engine. The remaining open risk is how the CLI presents the bridge token;
+resolve it (try `LORE_ACCESS_TOKEN` and `--identity-token`, read `lore-transport` authorization
+header construction) before building the policy and routes. Not run: Better Auth session to token
+minting, the v2 migration, the SDKs and the `/api/versioning/v1` routes.

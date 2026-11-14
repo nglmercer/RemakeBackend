@@ -1537,7 +1537,14 @@ name = "cloud-versioning"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "ed25519-dalek 2.2.0",
+ "jsonwebtoken",
  "lore-server",
+ "rand_core 0.6.4",
+ "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing",
@@ -2242,6 +2249,7 @@ checksum = "70e796c081cee67dc755e1a36a0a172b897fab85fc3f6bc48307991f64e4eca9"
 dependencies = [
  "curve25519-dalek 4.1.3",
  "ed25519 2.2.3",
+ "rand_core 0.6.4",
  "serde",
  "sha2 0.10.9",
  "subtle",
@@ -2763,7 +2771,7 @@ checksum = "627003914c6057c9c8f0832ee4f870b5a4f599d0cfa83f4072675114860cd0ff"
 [[package]]
 name = "glob-match"
 version = "0.2.1"
-source = "git+https://github.com/nglmercer/lore.git?rev=085eccbe4845890c51b6021db32390051d948ae0#085eccbe4845890c51b6021db32390051d948ae0"
+source = "git+https://github.com/nglmercer/lore.git?rev=603fa111939fab8f560d0e6c97dd27a50f73474a#603fa111939fab8f560d0e6c97dd27a50f73474a"
 
 [[package]]
 name = "gloo-timers"
@@ -3901,7 +3909,7 @@ dependencies = [
 [[package]]
 name = "lore-aws"
 version = "0.14.1-nightly"
-source = "git+https://github.com/nglmercer/lore.git?rev=085eccbe4845890c51b6021db32390051d948ae0#085eccbe4845890c51b6021db32390051d948ae0"
+source = "git+https://github.com/nglmercer/lore.git?rev=603fa111939fab8f560d0e6c97dd27a50f73474a#603fa111939fab8f560d0e6c97dd27a50f73474a"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -3937,7 +3945,7 @@ dependencies = [
 [[package]]
 name = "lore-base"
 version = "0.14.1-nightly"
-source = "git+https://github.com/nglmercer/lore.git?rev=085eccbe4845890c51b6021db32390051d948ae0#085eccbe4845890c51b6021db32390051d948ae0"
+source = "git+https://github.com/nglmercer/lore.git?rev=603fa111939fab8f560d0e6c97dd27a50f73474a#603fa111939fab8f560d0e6c97dd27a50f73474a"
 dependencies = [
  "backtrace",
  "bitcode",
@@ -3966,7 +3974,7 @@ dependencies = [
 [[package]]
 name = "lore-credential"
 version = "0.14.1-nightly"
-source = "git+https://github.com/nglmercer/lore.git?rev=085eccbe4845890c51b6021db32390051d948ae0#085eccbe4845890c51b6021db32390051d948ae0"
+source = "git+https://github.com/nglmercer/lore.git?rev=603fa111939fab8f560d0e6c97dd27a50f73474a#603fa111939fab8f560d0e6c97dd27a50f73474a"
 dependencies = [
  "apple-native-keyring-store",
  "base64 0.22.1",
@@ -3992,7 +4000,7 @@ dependencies = [
 [[package]]
 name = "lore-error-set"
 version = "0.1.0"
-source = "git+https://github.com/nglmercer/lore.git?rev=085eccbe4845890c51b6021db32390051d948ae0#085eccbe4845890c51b6021db32390051d948ae0"
+source = "git+https://github.com/nglmercer/lore.git?rev=603fa111939fab8f560d0e6c97dd27a50f73474a#603fa111939fab8f560d0e6c97dd27a50f73474a"
 dependencies = [
  "lore-error-set-macro",
 ]
@@ -4000,7 +4008,7 @@ dependencies = [
 [[package]]
 name = "lore-error-set-macro"
 version = "0.1.0"
-source = "git+https://github.com/nglmercer/lore.git?rev=085eccbe4845890c51b6021db32390051d948ae0#085eccbe4845890c51b6021db32390051d948ae0"
+source = "git+https://github.com/nglmercer/lore.git?rev=603fa111939fab8f560d0e6c97dd27a50f73474a#603fa111939fab8f560d0e6c97dd27a50f73474a"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4010,7 +4018,7 @@ dependencies = [
 [[package]]
 name = "lore-fuse"
 version = "0.14.1-nightly"
-source = "git+https://github.com/nglmercer/lore.git?rev=085eccbe4845890c51b6021db32390051d948ae0#085eccbe4845890c51b6021db32390051d948ae0"
+source = "git+https://github.com/nglmercer/lore.git?rev=603fa111939fab8f560d0e6c97dd27a50f73474a#603fa111939fab8f560d0e6c97dd27a50f73474a"
 dependencies = [
  "dashmap",
  "libc",
@@ -4026,7 +4034,7 @@ dependencies = [
 [[package]]
 name = "lore-hashicorp"
 version = "0.14.1-nightly"
-source = "git+https://github.com/nglmercer/lore.git?rev=085eccbe4845890c51b6021db32390051d948ae0#085eccbe4845890c51b6021db32390051d948ae0"
+source = "git+https://github.com/nglmercer/lore.git?rev=603fa111939fab8f560d0e6c97dd27a50f73474a#603fa111939fab8f560d0e6c97dd27a50f73474a"
 dependencies = [
  "async-trait",
  "lore-revision",
@@ -4043,7 +4051,7 @@ dependencies = [
 [[package]]
 name = "lore-io"
 version = "0.14.1-nightly"
-source = "git+https://github.com/nglmercer/lore.git?rev=085eccbe4845890c51b6021db32390051d948ae0#085eccbe4845890c51b6021db32390051d948ae0"
+source = "git+https://github.com/nglmercer/lore.git?rev=603fa111939fab8f560d0e6c97dd27a50f73474a#603fa111939fab8f560d0e6c97dd27a50f73474a"
 dependencies = [
  "bytes",
  "io-uring",
@@ -4056,7 +4064,7 @@ dependencies = [
 [[package]]
 name = "lore-macro"
 version = "0.14.1-nightly"
-source = "git+https://github.com/nglmercer/lore.git?rev=085eccbe4845890c51b6021db32390051d948ae0#085eccbe4845890c51b6021db32390051d948ae0"
+source = "git+https://github.com/nglmercer/lore.git?rev=603fa111939fab8f560d0e6c97dd27a50f73474a#603fa111939fab8f560d0e6c97dd27a50f73474a"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4066,7 +4074,7 @@ dependencies = [
 [[package]]
 name = "lore-notification"
 version = "0.14.1-nightly"
-source = "git+https://github.com/nglmercer/lore.git?rev=085eccbe4845890c51b6021db32390051d948ae0#085eccbe4845890c51b6021db32390051d948ae0"
+source = "git+https://github.com/nglmercer/lore.git?rev=603fa111939fab8f560d0e6c97dd27a50f73474a#603fa111939fab8f560d0e6c97dd27a50f73474a"
 dependencies = [
  "async-trait",
  "lore-base",
@@ -4084,7 +4092,7 @@ dependencies = [
 [[package]]
 name = "lore-proto"
 version = "0.1.67"
-source = "git+https://github.com/nglmercer/lore.git?rev=085eccbe4845890c51b6021db32390051d948ae0#085eccbe4845890c51b6021db32390051d948ae0"
+source = "git+https://github.com/nglmercer/lore.git?rev=603fa111939fab8f560d0e6c97dd27a50f73474a#603fa111939fab8f560d0e6c97dd27a50f73474a"
 dependencies = [
  "lore-base",
  "prost",
@@ -4097,7 +4105,7 @@ dependencies = [
 [[package]]
 name = "lore-revision"
 version = "0.14.1-nightly"
-source = "git+https://github.com/nglmercer/lore.git?rev=085eccbe4845890c51b6021db32390051d948ae0#085eccbe4845890c51b6021db32390051d948ae0"
+source = "git+https://github.com/nglmercer/lore.git?rev=603fa111939fab8f560d0e6c97dd27a50f73474a#603fa111939fab8f560d0e6c97dd27a50f73474a"
 dependencies = [
  "arc-swap",
  "async-stream",
@@ -4162,7 +4170,7 @@ dependencies = [
 [[package]]
 name = "lore-server"
 version = "0.14.1-nightly"
-source = "git+https://github.com/nglmercer/lore.git?rev=085eccbe4845890c51b6021db32390051d948ae0#085eccbe4845890c51b6021db32390051d948ae0"
+source = "git+https://github.com/nglmercer/lore.git?rev=603fa111939fab8f560d0e6c97dd27a50f73474a#603fa111939fab8f560d0e6c97dd27a50f73474a"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -4238,7 +4246,7 @@ dependencies = [
 [[package]]
 name = "lore-storage"
 version = "0.14.1-nightly"
-source = "git+https://github.com/nglmercer/lore.git?rev=085eccbe4845890c51b6021db32390051d948ae0#085eccbe4845890c51b6021db32390051d948ae0"
+source = "git+https://github.com/nglmercer/lore.git?rev=603fa111939fab8f560d0e6c97dd27a50f73474a#603fa111939fab8f560d0e6c97dd27a50f73474a"
 dependencies = [
  "async-trait",
  "bitcode",
@@ -4278,7 +4286,7 @@ dependencies = [
 [[package]]
 name = "lore-telemetry"
 version = "0.14.1-nightly"
-source = "git+https://github.com/nglmercer/lore.git?rev=085eccbe4845890c51b6021db32390051d948ae0#085eccbe4845890c51b6021db32390051d948ae0"
+source = "git+https://github.com/nglmercer/lore.git?rev=603fa111939fab8f560d0e6c97dd27a50f73474a#603fa111939fab8f560d0e6c97dd27a50f73474a"
 dependencies = [
  "axum",
  "http 1.5.0",
@@ -4302,7 +4310,7 @@ dependencies = [
 [[package]]
 name = "lore-transport"
 version = "0.14.1-nightly"
-source = "git+https://github.com/nglmercer/lore.git?rev=085eccbe4845890c51b6021db32390051d948ae0#085eccbe4845890c51b6021db32390051d948ae0"
+source = "git+https://github.com/nglmercer/lore.git?rev=603fa111939fab8f560d0e6c97dd27a50f73474a#603fa111939fab8f560d0e6c97dd27a50f73474a"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -5838,7 +5846,7 @@ dependencies = [
 [[package]]
 name = "quinn-proto"
 version = "0.11.19"
-source = "git+https://github.com/nglmercer/lore.git?rev=085eccbe4845890c51b6021db32390051d948ae0#085eccbe4845890c51b6021db32390051d948ae0"
+source = "git+https://github.com/nglmercer/lore.git?rev=603fa111939fab8f560d0e6c97dd27a50f73474a#603fa111939fab8f560d0e6c97dd27a50f73474a"
 dependencies = [
  "aws-lc-rs",
  "bytes",

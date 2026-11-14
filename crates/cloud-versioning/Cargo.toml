@@ -9,10 +9,18 @@ description = "Embeds the Lore versioning engine in RemakeBackend and adapts Rem
 [dependencies]
 # Pinned to a revision of the nglmercer/lore fork (branch remake/embedding). Update the rev
 # together with the [patch.crates-io] revs in the root Cargo.toml; see docs/VERSIONING-BUILD.md.
-lore-server = { git = "https://github.com/nglmercer/lore.git", rev = "085eccbe4845890c51b6021db32390051d948ae0" }
+lore-server = { git = "https://github.com/nglmercer/lore.git", rev = "603fa111939fab8f560d0e6c97dd27a50f73474a" }
 anyhow = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
+# Credential bridge: Ed25519 signing and the JWT envelope for Lore's native endpoints.
+ed25519-dalek = { version = "2", features = ["pkcs8", "rand_core"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+jsonwebtoken = "9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "signal"] }
 tracing = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
+axum = "0.8"

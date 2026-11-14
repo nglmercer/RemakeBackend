@@ -5,6 +5,8 @@
 //! crate only starts and stops the engine, reports its health, and hands out the authoritative
 //! stores. Native Lore listeners are off unless the configuration enables them.
 
+pub mod bridge;
+
 use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
 
@@ -25,10 +27,24 @@ use lore_server::settings::Settings;
 pub struct VersioningConfig {
     /// A persistent directory. It is created when missing.
     pub data_dir: PathBuf,
+    /// Address for Lore's native endpoints (gRPC over TCP and QUIC over UDP, on the same port),
+    /// or `None` (the default) to keep them off.
+    ///
+    /// The native endpoints carry clone, fetch and push for the Lore CLI. They are unauthenticated
+    /// until the credential bridge is configured, so bind it to a loopback address and enable it
+    /// only for local evaluation.
+    pub native_listen: Option<std::net::SocketAddr>,
+    /// How the native endpoints verify credentials. With `None` they accept any caller, so it is
+    /// only acceptable for a loopback evaluation. With `Some`, a request needs a token minted by
+    /// the [`bridge::CredentialBridge`] and is limited to the repositories the token grants.
+    pub native_auth: Option<bridge::NativeAuth>,
 }
 
 impl VersioningConfig {
     /// The Lore settings, as TOML overrides over Lore's built-in defaults.
+    ///
+    /// A branch advance is flushed to disk before it is reported (`durable_publication`), so a
+    /// publication the backend reports survives the process being killed.
     ///
     /// Every native listener is disabled: the backend's own routes are the public surface, and
     /// a native listener may be enabled only once its authentication and authorization are
@@ -36,19 +52,43 @@ impl VersioningConfig {
     fn lore_overrides(&self) -> String {
         let immutable = toml_string(&self.data_dir.join("immutable"));
         let mutable = toml_string(&self.data_dir.join("mutable"));
+        let grpc = match self.native_listen {
+            Some(address) => format!(
+                "[server.grpc]\nenabled = true\nhost = \"{ip}\"\nport = {port}\n\
+                 [server.quic]\nenabled = true\nhost = \"{ip}\"\nport = {port}\n",
+                ip = address.ip(),
+                port = address.port()
+            ),
+            None => "[server.grpc]\nenabled = false\n[server.quic]\nenabled = false\n".to_string(),
+        };
+        let auth = match &self.native_auth {
+            Some(auth) => format!(
+                "[server.auth]\njwt_issuer = [{}]\njwt_audience = [{}]\nresource_claim = \"resources\"\nexternal_credentials = true\n\
+                 [server.auth.jwk]\nendpoint = {}\n",
+                toml_text(&auth.issuer),
+                toml_text(&auth.audience),
+                toml_text(&auth.jwks_url)
+            ),
+            None => String::new(),
+        };
         format!(
-            "[server.quic]\nenabled = false\n\
+            "[server]\ndurable_publication = true\n\
              [server.http]\nenabled = false\n\
-             [server.grpc]\nenabled = false\n\
+             {grpc}\
              [immutable_store.local]\npath = {immutable}\n\
-             [mutable_store.local]\npath = {mutable}\n"
+             [mutable_store.local]\npath = {mutable}\n\
+             {auth}"
         )
     }
 }
 
 /// Quotes `path` as a TOML basic string.
 fn toml_string(path: &Path) -> String {
-    let text = path.to_string_lossy();
+    toml_text(&path.to_string_lossy())
+}
+
+/// Quotes `text` as a TOML basic string.
+fn toml_text(text: &str) -> String {
     let mut quoted = String::with_capacity(text.len() + 2);
     quoted.push('"');
     for character in text.chars() {
@@ -169,6 +209,8 @@ mod tests {
         for round in 0..2 {
             let host = VersioningHost::start(VersioningConfig {
                 data_dir: directory.path().to_path_buf(),
+                native_listen: None,
+                native_auth: None,
             })
             .await
             .unwrap_or_else(|error| panic!("round {round}: starts: {error:#}"));
@@ -188,6 +230,8 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         let config = VersioningConfig {
             data_dir: directory.path().to_path_buf(),
+            native_listen: None,
+            native_auth: None,
         };
         let first = VersioningHost::start(config.clone()).await.expect("first");
 
