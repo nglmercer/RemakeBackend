@@ -8,6 +8,8 @@ license = "MIT"
 [features]
 # Cross-checkout fixture runner only; adds no production endpoints or bypasses.
 native-peer-acceptance = []
+# Compiled CLI scenario, separate so SDK-only acceptance needs no CLI artifact.
+native-cli-acceptance = ["native-peer-acceptance"]
 
 [dependencies]
 cloud-contracts = { path = "../cloud-contracts" }

@@ -524,3 +524,37 @@ missing or stale epochs, a subsequent barrier, fenced writes and deletes,
 account isolation, and an uncertain application workspace saved and reopened
 with a newer local edit. It does not run the complete synchronization
 coordinator, verify recovery after a barrier, or establish two-PC acceptance.
+
+
+## Compiled headless CLI acceptance
+
+The `native-cli-acceptance` feature includes `native-peer-acceptance` and provides the ignored
+`native_cli_teams_end_to_end` fixture. It launches a separately compiled
+`tiktools` CLI through the application's `scripts/headless-teams-e2e.ts`,
+using this backend, private PostgreSQL data and native PKCE handoff accounts.
+It adds no production routes or authentication bypass.
+
+From the application checkout:
+
+```sh
+bun scripts/task.ts test headless-teams --binary /absolute/path/tiktools --backend /absolute/path/RemakeBackend --report /tmp/headless-teams.json
+```
+
+Install the backend's pgrust development tools first. The runner reuses those
+binaries, creates its own cluster, confirms that the exact fixture is selected,
+and requires a passing report with the current run identity. A zero-test run
+or a report left from an earlier invocation cannot pass acceptance.
+
+The CLI must include `cloud-auth`, `remote-client` and `remote-control`.
+Development binaries accept the fixture origin at runtime. For a release
+artifact, compile it with a private fixed loopback HTTPS origin and select that
+port through `--cloud-port PORT`; production-pinned release binaries are refused
+before authentication. The fixture uses only its synthetic identities in the OS
+keychain and logs them out before stopping the server. The existing SDK-only
+fixture continues to use memory-only credentials.
+
+Coverage includes owner creation and host enrollment, nickname discovery,
+recipient-bound invitation, explicit approval and native agent policy,
+delegated reads and journalled writes, resource denial, restart and revocation.
+The two processes run on one machine: this does not establish cross-NAT,
+physical two-PC, TikTok or OBS acceptance.
