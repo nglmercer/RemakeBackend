@@ -77,6 +77,8 @@ An existing cluster, for example the one the old launcher kept in
   `parallel = false` runs one at a time. A test whose reason names another variable (for
   example `CLOUD_V2_APP_SDK_TEST_BIN`, a separately built SDK binary) is reported `skipped` with the
   missing variable named, unless you export it. The development database is not touched.
+* The cross-repository SDK epoch fixture is compiled only with
+  `--features app-sdk-acceptance`; follow [its dedicated procedure](CLOUD-API-V2.md#application-sdk-integration-fixture).
 * `test --all`: unit, integration and a reported-as-`unsupported` e2e slot.
 
 Any failure makes the command exit non-zero. A run that executed no test is reported `skipped`,

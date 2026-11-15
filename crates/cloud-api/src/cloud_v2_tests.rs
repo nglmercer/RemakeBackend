@@ -144,6 +144,7 @@ async fn json_body(response: Response) -> Value {
 /// fixture, without a build-time path dependency on that checkout. The
 /// executable is an ignored test binary built by the caller; credentials are
 /// passed only through a pipe and never placed in argv or environment.
+#[cfg(feature = "app-sdk-acceptance")]
 #[tokio::test]
 #[ignore = "requires disposable CLOUD_TEST_DATABASE_URL and CLOUD_V2_APP_SDK_TEST_BIN"]
 async fn actual_app_sdk_epoch_contract_against_postgres() {
@@ -156,7 +157,10 @@ async fn actual_app_sdk_epoch_contract_against_postgres() {
     assert!(Path::new(&binary).is_file());
     // This fixture applies migrations. Refuse ordinary local or remote
     // databases even if the caller accidentally supplies one in the env.
-    let database = crate::test_support::migrated_url();
+    // Check the caller's database before the helper creates and migrates its
+    // isolated cloud_test_t_* clone, whose name intentionally differs.
+    let database = std::env::var("CLOUD_TEST_DATABASE_URL")
+        .expect("provide the dedicated SDK acceptance database");
     let database = url::Url::parse(&database).expect("invalid disposable database URL");
     assert!(matches!(database.scheme(), "postgres" | "postgresql"));
     assert_eq!(database.host_str(), Some("127.0.0.1"));

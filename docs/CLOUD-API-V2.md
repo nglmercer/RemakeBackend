@@ -499,11 +499,16 @@ of v2 conflicts in Desktop belongs to the later authorized integration.
 
 An ignored cross-repository test runs the actual application `cloud-client`
 against this backend over loopback HTTP and a disposable PostgreSQL database.
+It is compiled only with `--features app-sdk-acceptance`; ordinary backend
+`--ignored` runs do not require another repository's executable. When enabled,
+missing fixture configuration still fails instead of silently passing.
 It creates synthetic accounts, passes their tokens only through a private child
 process stdin, and deletes those accounts after the child completes or times
 out. The database URL must use `127.0.0.1`, an explicit port and a database name
 starting with `tiktools_sdk_epoch_`; provision that dedicated database before
-running, then remove it afterward. The fixture applies migrations to it.
+running, then remove it afterward. The shared test helper creates and migrates
+a private clone and removes that clone afterward. With `CLOUD_TEST_ISOLATE=0`,
+migrations apply directly to the dedicated database instead.
 
 First, from the application checkout, run:
 
@@ -516,7 +521,7 @@ Cargo**, and `CLOUD_TEST_DATABASE_URL` to the dedicated loopback PostgreSQL
 database. From the backend checkout run:
 
 ```sh
-cargo test -p cloud-api --locked --offline actual_app_sdk_epoch_contract_against_postgres -- --ignored --nocapture
+cargo test -p cloud-api --features app-sdk-acceptance --locked --offline actual_app_sdk_epoch_contract_against_postgres -- --ignored --nocapture
 ```
 
 This verifies the pre-enforcement to required-epoch transition, rejection of

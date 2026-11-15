@@ -117,7 +117,7 @@ For the database tests, point `CLOUD_TEST_DATABASE_URL` at a disposable
 PostgreSQL (or pgrust) server and run them in parallel:
 
 ```sh
-CLOUD_TEST_DATABASE_URL=postgres://user@127.0.0.1:5432/cloud_test cargo test --workspace --locked -- --include-ignored --skip google_jwks_live_refresh_smoke --skip staging_official_packages_install_with_pinned_client --skip real_clamav_scans_staging_packages --skip actual_app_sdk_epoch_contract_against_postgres
+CLOUD_TEST_DATABASE_URL=postgres://user@127.0.0.1:5432/cloud_test cargo test --workspace --locked -- --include-ignored --skip google_jwks_live_refresh_smoke --skip staging_official_packages_install_with_pinned_client --skip real_clamav_scans_staging_packages
 ```
 
 or let `cargo run -p devtools -- test --integration` provision everything.
@@ -139,3 +139,6 @@ point them at production. CI provisions a separate pgrust service. The
 fixture is not a substitute for a real Google or desktop end-to-end test.
 The skipped network and staging tests require separate services and inputs;
 see [Railway staging](docs/RAILWAY-STAGING.md) for the staging tests.
+The cross-repository application SDK fixture additionally requires
+`--features app-sdk-acceptance` and its separately built executable; see
+[the SDK acceptance procedure](docs/CLOUD-API-V2.md#application-sdk-integration-fixture).

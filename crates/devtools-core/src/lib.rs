@@ -2,11 +2,15 @@
 //!
 //! One library behind the `remake-dev` CLI, usable from tests and other tools:
 //!
-//! ```ignore
+//! ```no_run
+//! use devtools_core::DevEnvironment;
+//! # async fn example() -> anyhow::Result<()> {
 //! let tools = DevEnvironment::load()?;
 //! tools.database().up().await?;                 // reuses pgrust; never compiles it
 //! let run = tools.tests().run_integration().await?;
 //! let report = tools.reports().generate().await?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! Rules every module follows:
