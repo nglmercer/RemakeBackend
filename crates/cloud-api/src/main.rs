@@ -721,11 +721,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let (native_listen, native_auth) =
             versioning::native_settings(&versioning_state.bridge, |key| std::env::var(key).ok())
                 .map_err(std::io::Error::other)?;
-        let host = cloud_versioning::VersioningHost::start(cloud_versioning::VersioningConfig {
-            data_dir: dir.into(),
-            native_listen,
-            native_auth,
-        })
+        // Credential cutoffs recorded by earlier processes apply from the first request.
+        let cutoffs = versioning::load_cutoffs(&reconcile_pool, &versioning_state.revocations)
+            .await
+            .map_err(|error| {
+                std::io::Error::other(format!("loading revocation cutoffs: {error}"))
+            })?;
+        tracing::info!(accounts = cutoffs, "versioning revocation cutoffs loaded");
+        let host = cloud_versioning::VersioningHost::start_with_revocations(
+            cloud_versioning::VersioningConfig {
+                data_dir: dir.into(),
+                native_listen,
+                native_auth,
+            },
+            versioning_state.revocations.clone(),
+        )
         .await
         .map_err(|error| std::io::Error::other(format!("{error:#}")))?;
         let host = Arc::new(host);
@@ -810,7 +820,7 @@ fn app_with_engine(
     context: AuthContext,
     pool: PgPool,
     auth: AuthRouter,
-    engine: Option<Arc<cloud_versioning::VersioningHost>>,
+    versioning: Arc<versioning::Versioning>,
 ) -> Router {
     app_inner(
         context,
@@ -818,7 +828,7 @@ fn app_with_engine(
         auth,
         None,
         RouterFlags {
-            versioning: versioning::for_tests(engine).expect("the versioning credential key"),
+            versioning,
             peer: remote::peers::PeerConfig::default(),
             trusted_proxy_cidrs: Vec::new(),
             step_up_oauth: None,

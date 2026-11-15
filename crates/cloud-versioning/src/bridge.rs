@@ -41,6 +41,11 @@ struct Resource {
 
 #[derive(Serialize)]
 struct Claims<'a> {
+    /// A random id for this token, unique per issue.
+    jti: &'a str,
+    /// The issue time in milliseconds. Revocation compares against it, because the standard
+    /// `iat` is in whole seconds and a credential issued just after a revocation must not match it.
+    iat_ms: u64,
     sub: &'a str,
     iss: &'a str,
     aud: &'a str,
@@ -170,7 +175,16 @@ impl CredentialBridge {
                 permission: grant.actions.clone(),
             })
             .collect();
+        let mut random = [0u8; 16];
+        rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut random);
+        let jti = URL_SAFE_NO_PAD.encode(random);
+        let issued_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .context("reading the clock")?
+            .as_millis() as u64;
         let claims = Claims {
+            jti: &jti,
+            iat_ms: issued_ms,
             sub: subject,
             iss: &self.issuer,
             aud: &self.audience,

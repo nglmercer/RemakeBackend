@@ -6,6 +6,7 @@ use axum::{
     body::Body,
     http::{header, HeaderMap, Request},
 };
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use better_auth::email_password::{EmailPasswordService, SignUpInput};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use serde_json::{json, Value};
@@ -29,6 +30,8 @@ struct Fixture {
     engine: Option<Arc<cloud_versioning::VersioningHost>>,
     /// Keeps the engine's data directory alive for the fixture's lifetime.
     _data: Option<tempfile::TempDir>,
+    /// The versioning state the router serves, including the revocation list.
+    versioning: Arc<versioning::Versioning>,
 }
 
 async fn fixture(users_wanted: usize) -> Fixture {
@@ -82,16 +85,23 @@ async fn fixture_with(users_wanted: usize, with_engine: bool) -> Fixture {
             cookie: format!("{}={}", user.cookie.name, user.cookie.value),
         });
     }
+    // The engine and the application share one revocation list, as they do in the process.
+    let versioning = versioning::for_tests(None).unwrap();
     let (engine, data) = if with_engine {
         let data = tempfile::tempdir().unwrap();
-        let engine = cloud_versioning::VersioningHost::start(cloud_versioning::VersioningConfig {
-            data_dir: data.path().to_path_buf(),
-            native_listen: None,
-            native_auth: None,
-        })
+        let engine = cloud_versioning::VersioningHost::start_with_revocations(
+            cloud_versioning::VersioningConfig {
+                data_dir: data.path().to_path_buf(),
+                native_listen: None,
+                native_auth: None,
+            },
+            versioning.revocations.clone(),
+        )
         .await
         .unwrap();
-        (Some(Arc::new(engine)), Some(data))
+        let engine = Arc::new(engine);
+        versioning.set_engine(engine.clone());
+        (Some(engine), Some(data))
     } else {
         (None, None)
     };
@@ -99,7 +109,7 @@ async fn fixture_with(users_wanted: usize, with_engine: bool) -> Fixture {
         context.clone(),
         pool.clone(),
         AuthRouter::new(context.clone()).unwrap(),
-        engine.clone(),
+        versioning.clone(),
     );
     Fixture {
         router,
@@ -107,6 +117,7 @@ async fn fixture_with(users_wanted: usize, with_engine: bool) -> Fixture {
         users,
         engine,
         _data: data,
+        versioning,
     }
 }
 
@@ -256,10 +267,16 @@ async fn revoking_a_workspace_removes_its_grant_on_the_next_issue() {
     let id = register_workspace_for(&f, 0, OWNER_REPOSITORY).await;
     assert_eq!(issue(&f, 0).await.repositories.len(), 1);
 
-    assert!(versioning::revoke_workspace(&f.pool, id).await.unwrap());
+    assert!(
+        versioning::revoke_owned_workspace(&f.pool, id, &f.users[0].id)
+            .await
+            .unwrap()
+    );
     assert!(issue(&f, 0).await.repositories.is_empty());
     assert!(
-        !versioning::revoke_workspace(&f.pool, id).await.unwrap(),
+        !versioning::revoke_owned_workspace(&f.pool, id, &f.users[0].id)
+            .await
+            .unwrap(),
         "a second revoke changes nothing"
     );
 }
@@ -458,7 +475,11 @@ async fn a_revoked_workspace_is_not_listed() {
     let f = fixture(1).await;
     let (_, created) = create_workspace(&f, 0, "stream").await;
     let id: uuid::Uuid = created["id"].as_str().unwrap().parse().unwrap();
-    assert!(versioning::revoke_workspace(&f.pool, id).await.unwrap());
+    assert!(
+        versioning::revoke_owned_workspace(&f.pool, id, &f.users[0].id)
+            .await
+            .unwrap()
+    );
     assert!(list(&f, 0).await.is_empty());
 }
 
@@ -495,4 +516,150 @@ async fn a_branch_head_is_read_for_the_owner_and_hidden_from_others() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+/// The issue time, in milliseconds, that a native credential carries.
+fn issued_ms(token: &str) -> u64 {
+    use base64::Engine as _;
+    let payload = token.split('.').nth(1).expect("a compact JWT");
+    let bytes = URL_SAFE_NO_PAD.decode(payload).expect("base64url payload");
+    let claims: Value = serde_json::from_slice(&bytes).expect("JSON claims");
+    claims["iat_ms"]
+        .as_u64()
+        .expect("the issue time in milliseconds")
+}
+
+/// A short pause, so that a credential issued after a revocation carries a later millisecond.
+async fn tick() {
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revoking_credentials_refuses_the_issued_ones_and_a_new_one_works() {
+    let f = fixture(1).await;
+    register_workspace_for(&f, 0, OWNER_REPOSITORY).await;
+    let before = issue(&f, 0).await;
+    tick().await;
+
+    let (status, _, _) = call(
+        &f,
+        Some(0),
+        "POST",
+        "/api/versioning/v1/native-credentials/revoke",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let owner = f.users[0].id.clone();
+    assert!(f
+        .versioning
+        .revocations
+        .is_revoked(&owner, Some(issued_ms(&before.token))));
+
+    tick().await;
+    let after = issue(&f, 0).await;
+    assert!(!f
+        .versioning
+        .revocations
+        .is_revoked(&owner, Some(issued_ms(&after.token))));
+    assert_eq!(after.repositories, vec![OWNER_REPOSITORY.to_string()]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn revoking_credentials_requires_an_account() {
+    let f = fixture(1).await;
+    let (status, _, _) = call(
+        &f,
+        None,
+        "POST",
+        "/api/versioning/v1/native-credentials/revoke",
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cutoffs_are_recorded_and_survive_a_restart() {
+    let f = fixture(1).await;
+    register_workspace_for(&f, 0, OWNER_REPOSITORY).await;
+    let before = issue(&f, 0).await;
+    tick().await;
+    let (status, _, _) = call(
+        &f,
+        Some(0),
+        "POST",
+        "/api/versioning/v1/native-credentials/revoke",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // A fresh process starts with no memory of the revocation and loads it from the database.
+    let restarted = cloud_versioning::revocation::RevocationList::new();
+    let loaded = versioning::load_cutoffs(&f.pool, &restarted).await.unwrap();
+    assert_eq!(loaded, 1);
+    assert!(restarted.is_revoked(&f.users[0].id, Some(issued_ms(&before.token))));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ending_a_workspace_removes_it_and_refuses_the_owners_earlier_credentials() {
+    let f = fixture(2).await;
+    let (_, created) = create_workspace(&f, 0, "ending").await;
+    let id = created["id"].as_str().unwrap().to_string();
+    let before = issue(&f, 0).await;
+    assert_eq!(before.repositories.len(), 1);
+    tick().await;
+
+    let path = format!("/api/versioning/v1/workspaces/{id}");
+    let (other, _, _) = call(&f, Some(1), "DELETE", &path).await;
+    assert_eq!(
+        other,
+        StatusCode::NOT_FOUND,
+        "another account cannot end it"
+    );
+
+    let (status, _, _) = call(&f, Some(0), "DELETE", &path).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(list(&f, 0).await.is_empty());
+    let owner = f.users[0].id.clone();
+    assert!(f
+        .versioning
+        .revocations
+        .is_revoked(&owner, Some(issued_ms(&before.token))));
+
+    let (again, _, _) = call(&f, Some(0), "DELETE", &path).await;
+    assert_eq!(again, StatusCode::NOT_FOUND, "a workspace ends once");
+    tick().await;
+    assert!(issue(&f, 0).await.repositories.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_workspace_has_an_empty_history_and_others_cannot_read_it() {
+    let f = fixture(2).await;
+    let (_, created) = create_workspace(&f, 0, "history").await;
+    let id = created["id"].as_str().unwrap().to_string();
+    let path = format!("/api/versioning/v1/workspaces/{id}/branches/main/revisions");
+
+    let (status, _, body) = call(&f, Some(0), "GET", &path).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["branch"], "main");
+    assert_eq!(body["revisions"], json!([]));
+    assert_eq!(body["hasMore"], false);
+
+    let (other, _, _) = call(&f, Some(1), "GET", &path).await;
+    assert_eq!(other, StatusCode::NOT_FOUND);
+    let (bad_limit, _, _) = call(
+        &f,
+        Some(0),
+        "GET",
+        &format!("/api/versioning/v1/workspaces/{id}/branches/main/revisions?limit=0"),
+    )
+    .await;
+    assert_eq!(bad_limit, StatusCode::BAD_REQUEST);
+    let (missing_branch, _, _) = call(
+        &f,
+        Some(0),
+        "GET",
+        &format!("/api/versioning/v1/workspaces/{id}/branches/nope/revisions"),
+    )
+    .await;
+    assert_eq!(missing_branch, StatusCode::NOT_FOUND);
 }

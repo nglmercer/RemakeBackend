@@ -257,3 +257,30 @@ Still not done, and not part of the reduced objective:
 - Revocation of issued credentials before they expire. The mitigation is the 300-second lifetime,
   because the engine verifies tokens itself and offers no deny list. The key file also shares one
   key across processes that share the file, but distributing it across hosts is not implemented.
+
+## Revocation and history
+
+- **Credential revocation.** `POST /api/versioning/v1/native-credentials/revoke` refuses every
+  credential the caller holds, by recording a cutoff in `versioning_token_cutoffs`. Each token now
+  carries a millisecond issue time (`iat_ms`) and a random `jti`. The engine runs with a host
+  authorizer (`cloud_versioning::revocation::RevocableAuthorizer`) that refuses a token issued before
+  its account's cutoff, before it looks at the grants. Cutoffs are loaded at startup, so a revocation
+  survives a restart. Verified with the Lore CLI: a credential works, is refused by the engine after
+  revocation, and a new credential works.
+- **Ending a workspace.** `DELETE /api/versioning/v1/workspaces/{id}` ends an owned workspace and
+  refuses the owner's earlier credentials, so the next credential names only the remaining
+  workspaces. Another account gets not found. The first version of this route had no owner check in
+  its update; a test caught it and the check is now part of the same statement.
+- **Branch history.** `GET /api/versioning/v1/workspaces/{id}/branches/{branch}/revisions?limit=N`
+  lists recent revisions, newest first, with `hasMore`. The engine's in-process admin runs the same
+  listing the branch-revision RPC runs. Limit 1 to 200, default 50. Owner only; a missing branch is
+  not found.
+
+Limits that remain on revocation: the cutoffs live in each process, so several engines must share
+them through the database or a notification, which is not implemented. A session already open keeps
+the grants it started with until it ends, because the engine checks each command against the grants
+recorded at session start.
+
+Still not done: publication through the API (history is read, not written), recoverable
+publication by operation ID, resumable uploads, the v2 migration, SDKs in Rust, TypeScript and
+Python, and the product CLI.

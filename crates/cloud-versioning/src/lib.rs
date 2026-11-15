@@ -6,9 +6,11 @@
 //! stores. Native Lore listeners are off unless the configuration enables them.
 
 pub mod bridge;
+pub mod revocation;
 
 use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
@@ -154,14 +156,36 @@ impl VersioningHost {
     /// Fails when the directory cannot be created, the settings are invalid, or the stores
     /// cannot be opened, for example because another process holds them.
     pub async fn start(config: VersioningConfig) -> Result<Self> {
+        Self::start_with_revocations(config, Arc::new(revocation::RevocationList::new())).await
+    }
+
+    /// Starts the engine with the revocation cutoffs the host keeps, so that the host can revoke
+    /// credentials that the engine refuses from then on.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`start`](Self::start).
+    pub async fn start_with_revocations(
+        config: VersioningConfig,
+        revocations: Arc<revocation::RevocationList>,
+    ) -> Result<Self> {
         std::fs::create_dir_all(&config.data_dir)
             .with_context(|| format!("creating {}", config.data_dir.display()))?;
         let directory_lock = lock_directory(&config.data_dir)?;
         let (settings, settings_hash) = Settings::from_overrides(&config.lore_overrides())
             .context("building the Lore settings")?;
-        let server = EmbeddedServer::start(settings, settings_hash, ServerConfig::default())
-            .await
-            .context("starting the embedded Lore server")?;
+        let server = EmbeddedServer::start(
+            settings,
+            settings_hash,
+            ServerConfig {
+                repository_authorizer: Some(Arc::new(revocation::RevocableAuthorizer::new(
+                    revocations,
+                ))),
+                ..ServerConfig::default()
+            },
+        )
+        .await
+        .context("starting the embedded Lore server")?;
         tracing::info!(data_dir = %config.data_dir.display(), "Versioning engine started");
         Ok(Self {
             server,
@@ -231,6 +255,27 @@ impl VersioningHost {
             .as_ref()
             .ok_or_else(|| tonic::Status::unavailable("the engine serves no repository"))?;
         admin.branch_head(id, branch).await
+    }
+
+    /// The most recent revisions of a branch of repository `id`, newest first, up to `limit`, and
+    /// whether older ones remain. The host must have authorized the caller for the repository.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` for a missing repository or branch, and the status the engine reports otherwise.
+    pub async fn branch_history(
+        &self,
+        id: [u8; 16],
+        branch: &str,
+        limit: u32,
+    ) -> Result<(Vec<lore_proto::Revision>, bool), tonic::Status> {
+        let admin = self
+            .server
+            .stores()
+            .repositories
+            .as_ref()
+            .ok_or_else(|| tonic::Status::unavailable("the engine serves no repository"))?;
+        admin.branch_history(id, branch, limit).await
     }
 
     /// Whether the engine can serve right now.

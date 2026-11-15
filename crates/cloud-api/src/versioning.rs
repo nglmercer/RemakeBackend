@@ -44,6 +44,9 @@ const OWNER_ACTIONS: [&str; 2] = ["read", "write"];
 /// from this process's own key set at startup. Until it is set, workspace creation answers 503.
 pub struct Versioning {
     pub bridge: Arc<CredentialBridge>,
+    /// Revocation cutoffs the engine consults. Shared with the engine, so a revocation here takes
+    /// effect there at once.
+    pub revocations: Arc<cloud_versioning::revocation::RevocationList>,
     engine: std::sync::Mutex<Option<Arc<cloud_versioning::VersioningHost>>>,
 }
 
@@ -52,6 +55,7 @@ impl Versioning {
     pub fn new(bridge: Arc<CredentialBridge>) -> Self {
         Self {
             bridge,
+            revocations: Arc::new(cloud_versioning::revocation::RevocationList::new()),
             engine: std::sync::Mutex::new(None),
         }
     }
@@ -376,14 +380,20 @@ pub async fn register_workspace(
     .await
 }
 
-/// Ends a workspace's ownership, so its repository is no longer granted to the owner.
-// Used by the tests until the workspace creation flow calls them.
-#[cfg_attr(not(test), allow(dead_code))]
-pub async fn revoke_workspace(pool: &sqlx::PgPool, id: uuid::Uuid) -> Result<bool, sqlx::Error> {
+/// Ends a workspace's ownership when `owner_user_id` owns it and it is active. Returns whether a
+/// workspace was ended. The owner check is part of the same statement, so another account's
+/// workspace is never changed.
+pub async fn revoke_owned_workspace(
+    pool: &sqlx::PgPool,
+    id: uuid::Uuid,
+    owner_user_id: &str,
+) -> Result<bool, sqlx::Error> {
     let result = sqlx::query(
-        "UPDATE versioning_workspaces SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL",
+        "UPDATE versioning_workspaces SET revoked_at = now() \
+         WHERE id = $1 AND owner_user_id = $2 AND revoked_at IS NULL",
     )
     .bind(id)
+    .bind(owner_user_id)
     .execute(pool)
     .await?;
     Ok(result.rows_affected() == 1)
@@ -640,6 +650,148 @@ pub async fn branch_head(
     Ok(Json(BranchHead { branch, revision }))
 }
 
+/// Loads the revocation cutoffs recorded by earlier processes into `revocations`, so that a
+/// revocation survives a restart. Returns how many accounts have a cutoff.
+pub async fn load_cutoffs(
+    pool: &PgPool,
+    revocations: &cloud_versioning::revocation::RevocationList,
+) -> Result<usize, sqlx::Error> {
+    let rows = sqlx::query("SELECT subject, revoked_before_ms FROM versioning_token_cutoffs")
+        .fetch_all(pool)
+        .await?;
+    for row in &rows {
+        let subject: String = row.get("subject");
+        let at_ms: i64 = row.get("revoked_before_ms");
+        revocations.revoke_before(&subject, at_ms.max(0) as u64);
+    }
+    Ok(rows.len())
+}
+
+/// Records and applies a cutoff for `subject`, so that every credential of the account issued so
+/// far is refused. A later cutoff never weakens an earlier one, in the database or in memory.
+async fn cut_off(state: &AppState, subject: &str) -> Result<(), StatusCode> {
+    let at_ms = cloud_versioning::revocation::now_ms();
+    sqlx::query(
+        "INSERT INTO versioning_token_cutoffs (subject, revoked_before_ms) VALUES ($1, $2) \
+         ON CONFLICT (subject) DO UPDATE SET revoked_before_ms = \
+         GREATEST(versioning_token_cutoffs.revoked_before_ms, EXCLUDED.revoked_before_ms)",
+    )
+    .bind(subject)
+    .bind(at_ms as i64)
+    .execute(&state.pool)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    state.versioning.revocations.revoke_before(subject, at_ms);
+    Ok(())
+}
+
+/// Refuses every credential the caller holds. The caller then issues a new one, which carries
+/// the current grants. Credentials already in use stop working on their next check.
+pub async fn revoke_credentials(
+    DualUser(user): DualUser,
+    State(state): State<AppState>,
+) -> Result<StatusCode, StatusCode> {
+    crate::uploads::limit(&state, &user.user.id, "credential-revoke").await?;
+    cut_off(&state, &user.user.id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Ends a workspace the caller owns. Its repository is no longer granted, and the caller's
+/// credentials are refused, so the next credential names only the remaining workspaces. A
+/// workspace the caller does not own is not found.
+pub async fn end_workspace(
+    DualUser(user): DualUser,
+    State(state): State<AppState>,
+    axum::extract::Path(workspace): axum::extract::Path<uuid::Uuid>,
+) -> Result<StatusCode, StatusCode> {
+    crate::uploads::limit(&state, &user.user.id, "workspace-end").await?;
+    if !revoke_owned_workspace(&state.pool, workspace, &user.user.id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    cut_off(&state, &user.user.id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// The query of a history request.
+#[derive(serde::Deserialize)]
+pub struct HistoryQuery {
+    #[serde(default)]
+    limit: Option<u32>,
+}
+
+/// The most revisions one history request returns.
+const HISTORY_LIMIT_MAX: u32 = 200;
+/// The revisions a history request returns when it names no limit.
+const HISTORY_LIMIT_DEFAULT: u32 = 50;
+
+/// The recent history of one branch of a workspace the caller owns, newest first. Revisions are
+/// reported by their hexadecimal ids; a parent is given only when the engine records one.
+pub async fn branch_history(
+    DualUser(user): DualUser,
+    State(state): State<AppState>,
+    axum::extract::Path((workspace, branch)): axum::extract::Path<(uuid::Uuid, String)>,
+    axum::extract::Query(query): axum::extract::Query<HistoryQuery>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    crate::uploads::limit(&state, &user.user.id, "branch-history").await?;
+    if !valid_branch_name(&branch) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let limit = query.limit.unwrap_or(HISTORY_LIMIT_DEFAULT);
+    if limit == 0 || limit > HISTORY_LIMIT_MAX {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let row = sqlx::query(
+        "SELECT lore_repository_id FROM versioning_workspaces \
+         WHERE id = $1 AND owner_user_id = $2 AND revoked_at IS NULL AND state = 'active'",
+    )
+    .bind(workspace)
+    .bind(&user.user.id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .ok_or(StatusCode::NOT_FOUND)?;
+    let repository_id: String = row.get("lore_repository_id");
+    let bytes: [u8; 16] = hex::decode(&repository_id)
+        .ok()
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let engine = state
+        .versioning
+        .engine()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let (revisions, has_more) =
+        engine
+            .branch_history(bytes, &branch, limit)
+            .await
+            .map_err(|status| match status.code() {
+                cloud_versioning::tonic::Code::NotFound => StatusCode::NOT_FOUND,
+                cloud_versioning::tonic::Code::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            })?;
+    let revisions: Vec<serde_json::Value> = revisions
+        .iter()
+        .map(|revision| {
+            serde_json::json!({
+                "id": hex::encode(&revision.id),
+                "message": revision.commit_message,
+                "timestamp": revision.timestamp,
+                "createdBy": revision.created_by,
+                "committedBy": revision.committed_by,
+                "number": revision.number,
+                "parent": revision.parent_self.as_ref().map(hex::encode),
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({
+        "branch": branch,
+        "revisions": revisions,
+        "hasMore": has_more,
+    })))
+}
+
 /// The versioning routes: the public key set, native credential issue, and workspace creation.
 pub fn routes() -> axum::Router<AppState> {
     use axum::routing::{get, post};
@@ -656,7 +808,20 @@ pub fn routes() -> axum::Router<AppState> {
                 .layer(axum::middleware::map_response(crate::sync::no_store)),
         )
         .route(
+            "/api/versioning/v1/native-credentials/revoke",
+            post(revoke_credentials).layer(axum::middleware::map_response(crate::sync::no_store)),
+        )
+        .route(
+            "/api/versioning/v1/workspaces/{id}",
+            axum::routing::delete(end_workspace)
+                .layer(axum::middleware::map_response(crate::sync::no_store)),
+        )
+        .route(
             "/api/versioning/v1/workspaces/{id}/branches/{branch}",
             get(branch_head).layer(axum::middleware::map_response(crate::sync::no_store)),
+        )
+        .route(
+            "/api/versioning/v1/workspaces/{id}/branches/{branch}/revisions",
+            get(branch_history).layer(axum::middleware::map_response(crate::sync::no_store)),
         )
 }
