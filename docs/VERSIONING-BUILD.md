@@ -125,16 +125,17 @@ build. Results:
 | `SIGKILL` right after an acknowledged push | **Lost** with Lore's default flush delay; survives after the `[server] durable_publication = true` fork change (2/2). Survives a kill 14 s later without it. |
 | 1 GiB file | Push 5 s, clone 19 s, SHA-256 identical. Server peak RSS 327 MB (push) and 824 MB (clone) against a 253 MB baseline; the clone figure may include mapped store pages and needs a proper measurement before promising a memory budget. |
 | Authenticated native endpoints, creation | Works: `repository create` with a bridge token passed as `--identity-token` succeeds. The token must go in `--identity-token` (the flags are mutually exclusive with `--identity`): `--access-token` alone sends no authentication token, and the unscoped create service refuses that. |
-| Lore transport fix (`0d64e1d4`) | A supplied `--access-token` without a named identity was dropped and sent no authorization. Fixed, with a failing-then-passing test; the transport unit suite passes (391/391). |
-| Authenticated push and clone, repository-scoped | **Blocked.** Push fails with `Not authorized to access repository` when opening the QUIC storage session, and a clone fails with `Repository not found` at the repository lookup. This happens for an exact repository grant and for a wildcard `urc-*` grant with `read,write`, so the cause is not the repository matching. The server logs no denial reason at the default level. Open question: which token the storage session presents and how `ResourceGrantsAuthorizer` judges it. |
-| Isolation (another account, read-only, tampered token) | Not evaluated: the positive case is blocked, so the negative cases prove nothing yet. The scripts are in the session scratchpad, not in the repository. |
+| Lore transport fixes (`0d64e1d4`, `73319125`) | Two client paths dropped a supplied credential: the connection's exchange (no identity named) and the storage session against a server with no authentication endpoint. The storage session then sent no token and the server answered `MissingToken`, reported as not authorized. Both are fixed with tests; the transport unit suite passes (395/395). |
+| Owner push and clone, by name and by id | Works. Alice's push succeeds and both clones match the pushed bytes (`--identity-token` and `--access-token` both set to the bridge token). |
+| Isolation | Works. A foreign account gets `Repository not found` (no existence leak) on clone; a missing token and a tampered signature are refused; a read-only token clones but its push fails with `Not authorized to access repository`. |
 
-Verdict: the embedded engine is viable for the parts already measured (transport, conflict
-detection, history, large-file transfer, durability). Whether **the native Lore CLI can be used
-for authenticated repository access on this engine is not yet established**: the create path works,
-the repository-scoped path does not. Resolving the storage-session denial is the next blocker, and
-the authorization model (`resources` claim, identity-token versus access-token roles) must be settled
-before policy and routes are built on it.
+Verdict: the embedded engine is viable for native authenticated access through the Lore CLI, for
+the behaviours checked above. Limits that remain: the bridge is a loopback evaluation harness with
+an unauthenticated mint endpoint, not a production credential service; tokens are minted with a
+fixed 300 s lifetime and no revocation; and the engine runs in a debug build with ephemeral
+certificates. Tracked separately: the memory measurement of large clones, and the verbosity of the
+identity/access token flags (they are documented as unsafe for secrets on the command line).
 
-Not run: the Better Auth session to token minting, the v2 migration, the SDKs and the
-`/api/versioning/v1` routes.
+Not started: the Better Auth session to token minting, the v2 migration, the SDKs and the
+`/api/versioning/v1` routes. These are the remaining stages of the migration; the native-path
+viability question above is the one this spike answers.
