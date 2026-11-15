@@ -11,9 +11,13 @@ use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+
 use lore_server::server::{EmbeddedServer, ServerStores};
 use lore_server::server_config::ServerConfig;
 use lore_server::settings::Settings;
+/// The status type the engine reports errors with, re-exported so hosts map codes without a
+/// second version of the crate.
+pub use tonic;
 
 /// Where the engine keeps its authoritative stores.
 ///
@@ -171,6 +175,43 @@ impl VersioningHost {
         self.server.stores()
     }
 
+    /// Creates a repository in the engine with `name` and `id`, the 16-byte identifier Lore uses
+    /// for repositories, and records `creator` as its creator.
+    ///
+    /// The host must have authorized the caller before calling this. It is the same create the
+    /// engine's RPC performs: a repeated create of the same id and name succeeds, and the same id
+    /// with another name is `AlreadyExists`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the status the engine reports: `InvalidArgument` for an invalid id or name, and
+    /// `AlreadyExists` for an id taken by another name.
+    pub async fn create_repository(
+        &self,
+        id: [u8; 16],
+        name: &str,
+        creator: &str,
+    ) -> Result<(), tonic::Status> {
+        let admin = self
+            .server
+            .stores()
+            .repositories
+            .as_ref()
+            .ok_or_else(|| tonic::Status::unavailable("the engine serves no repository"))?;
+        admin
+            .create(lore_proto::RepositoryCreateRequest {
+                id: id.to_vec().into(),
+                name: name.to_string(),
+                description: String::new(),
+                default_branch_id: uuid_bytes().into(),
+                default_branch_name: "main".to_string(),
+                creator: creator.to_string(),
+                created: now_seconds(),
+            })
+            .await
+            .map(|_| ())
+    }
+
     /// Whether the engine can serve right now.
     #[must_use]
     pub fn health(&self) -> HostHealth {
@@ -189,6 +230,21 @@ impl VersioningHost {
         tracing::info!("Versioning engine stopped");
         Ok(())
     }
+}
+
+/// A fresh random identifier for the default branch, which the engine requires to be non-zero.
+fn uuid_bytes() -> Vec<u8> {
+    use rand_core::RngCore;
+    let mut bytes = [0u8; 16];
+    rand_core::OsRng.fill_bytes(&mut bytes);
+    bytes.to_vec()
+}
+
+/// The creation time the engine records, in seconds since the Unix epoch.
+fn now_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
 }
 
 #[cfg(test)]

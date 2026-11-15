@@ -23,11 +23,11 @@ Lore's two workspace patches from the same revision, because Cargo does not appl
 own `[patch]` section to its consumer:
 
 ```toml
-lore-server = { git = "https://github.com/nglmercer/lore.git", rev = "0d64e1d4..." }
+lore-server = { git = "https://github.com/nglmercer/lore.git", rev = "bfde21b7..." }
 
 [patch.crates-io]
-quinn-proto = { git = "https://github.com/nglmercer/lore.git", rev = "0d64e1d4..." }
-glob-match = { git = "https://github.com/nglmercer/lore.git", rev = "0d64e1d4..." }
+quinn-proto = { git = "https://github.com/nglmercer/lore.git", rev = "bfde21b7..." }
+glob-match = { git = "https://github.com/nglmercer/lore.git", rev = "bfde21b7..." }
 ```
 
 Cargo finds `lore-server` and the two vendored crates inside the repository by package name.
@@ -55,7 +55,7 @@ ahead of the baseline (both in `lore-revision`) when the fork was made.
 
 ## What exists
 
-Lore fork (`nglmercer/lore`, branch `remake/embedding`, commit `0d64e1d4`):
+Lore fork (`nglmercer/lore`, branch `remake/embedding`, commit `bfde21b7`, the current pin):
 
 - `lore_server::server::EmbeddedServer`: starts the server inside a host runtime, leaves the
   tracing subscriber and process signals to the host, serves until stopped, and restarts in the
@@ -125,7 +125,7 @@ build. Results:
 | `SIGKILL` right after an acknowledged push | **Lost** with Lore's default flush delay; survives after the `[server] durable_publication = true` fork change (2/2). Survives a kill 14 s later without it. |
 | 1 GiB file | Push 5 s, clone 19 s, SHA-256 identical. Server peak RSS 327 MB (push) and 824 MB (clone) against a 253 MB baseline; the clone figure may include mapped store pages and needs a proper measurement before promising a memory budget. |
 | Authenticated native endpoints, creation | Works: `repository create` with a bridge token passed as `--identity-token` succeeds. The token must go in `--identity-token` (the flags are mutually exclusive with `--identity`): `--access-token` alone sends no authentication token, and the unscoped create service refuses that. |
-| Lore transport fixes (`0d64e1d4`, `73319125`) | Two client paths dropped a supplied credential: the connection's exchange (no identity named) and the storage session against a server with no authentication endpoint. The storage session then sent no token and the server answered `MissingToken`, reported as not authorized. Both are fixed with tests; the transport unit suite passes (395/395). |
+| Lore transport fixes (`0d64e1d4`, `bfde21b7`) | Two client paths dropped a supplied credential: the connection's exchange (no identity named) and the storage session against a server with no authentication endpoint. The storage session then sent no token and the server answered `MissingToken`, reported as not authorized. Both are fixed with tests; the transport unit suite passes (395/395). |
 | Owner push and clone, by name and by id | Works. Alice's push succeeds and both clones match the pushed bytes (`--identity-token` and `--access-token` both set to the bridge token). |
 | Isolation | Works. A foreign account gets `Repository not found` (no existence leak) on clone; a missing token and a tampered signature are refused; a read-only token clones but its push fails with `Not authorized to access repository`. |
 
@@ -165,10 +165,28 @@ Full `cloud-api` run against PostgreSQL 18: the 96 default tests and 113 of the 
 tests pass. The two that fail need environment this machine lacks (a ClamAV daemon and the staging
 package set) and fail on a missing variable, not on behavior.
 
-Not done: the workspace creation flow (the engine is not yet started inside `cloud-api`, so a
-repository cannot be created through the backend); the engine's JWKS fetch from this route; a
-persistent or shared signing key for several instances; revocation of already-issued tokens;
-the v2 migration; the `/api/versioning/v1` repository, reference and commit routes; the SDKs.
+Workspace creation, added after the above:
+
+- `POST /api/versioning/v1/workspaces` with `{"name": ...}`, authenticated by `DualUser`. It
+  creates a repository in the engine through `EmbeddedServer::stores().repositories`, which runs
+  the same create handler as the RPC, and records the caller as owner in one transaction the
+  engine create runs inside. A repeated name is a 400; an engine refusal rolls the row back.
+  Without a configured engine it answers 503 and records nothing.
+- The engine runs inside `cloud-api` when `REMAKE_VERSIONING_DATA_DIR` names a directory. Native
+  listeners stay off. The engine's own name for a repository is `ws-<repositoryId>`.
+- Tests (eleven in `versioning_tests.rs`, real engine and PostgreSQL): creation needs an account;
+  the engine holds the repository under the derived name (a create with that name succeeds, another
+  name is `AlreadyExists`); the owner's credential names it with `read,write` only and the other
+  account holds no grant; each workspace gets its own repository; invalid names write nothing;
+  creation is unavailable without an engine.
+- The full `cloud-api` suite passes with database-gated tests included (214 of 216). The two
+  failures are the ClamAV and staging-package tests, which need variables this machine lacks.
+
+Not done: the engine's JWKS fetch from the backend route (native listeners are off, so the
+engine does not yet accept native clients); a shared signing key for several instances; revocation
+of already-issued tokens; the rollback on a failed commit after the engine create, which leaves an
+ownerless repository and needs a reconciliation pass; the v2 migration; the `/api/versioning/v1`
+repository, reference and commit routes; the SDKs; the product CLI.
 
 Local test database used for the above: a system PostgreSQL 18 cluster started with a short
 socket directory (`-k /tmp/...`, since the default path exceeds the Unix socket length limit

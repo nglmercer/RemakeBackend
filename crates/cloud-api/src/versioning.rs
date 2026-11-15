@@ -37,6 +37,23 @@ pub const LIFETIME_SECONDS: u64 = 300;
 /// out of user credentials.
 const OWNER_ACTIONS: [&str; 2] = ["read", "write"];
 
+/// The versioning state of this process: the key that signs native tokens, and the engine that
+/// stores repositories when one is configured.
+pub struct Versioning {
+    pub bridge: Arc<CredentialBridge>,
+    pub engine: Option<Arc<cloud_versioning::VersioningHost>>,
+}
+
+impl Versioning {
+    /// Generates the signing key for this process and attaches the engine.
+    pub fn new(engine: Option<Arc<cloud_versioning::VersioningHost>>) -> Result<Self, String> {
+        Ok(Self {
+            bridge: bridge()?,
+            engine,
+        })
+    }
+}
+
 /// Builds the bridge that signs native tokens for this process.
 ///
 /// The key is generated at startup and not stored. A restart invalidates every outstanding
@@ -58,7 +75,7 @@ pub struct NativeCredential {
 
 /// The public key set the engine fetches to verify native tokens. Carries no private material.
 pub async fn jwks(State(state): State<AppState>) -> Response {
-    let mut response = state.versioning.jwks_json().into_response();
+    let mut response = state.versioning.bridge.jwks_json().into_response();
     response.headers_mut().insert(
         axum::http::header::CONTENT_TYPE,
         axum::http::HeaderValue::from_static("application/json"),
@@ -95,6 +112,7 @@ pub async fn issue(
         .collect();
     let token = state
         .versioning
+        .bridge
         .mint(&user.user.id, &grants, LIFETIME_SECONDS)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(NativeCredential {
@@ -140,7 +158,92 @@ pub async fn revoke_workspace(pool: &sqlx::PgPool, id: uuid::Uuid) -> Result<boo
     Ok(result.rows_affected() == 1)
 }
 
-/// The versioning routes: the public key set, and native credential issue.
+/// The request that creates a workspace.
+#[derive(serde::Deserialize)]
+pub struct WorkspaceRequest {
+    name: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Workspace {
+    id: uuid::Uuid,
+    repository_id: String,
+    name: String,
+}
+
+/// Creates a repository in the engine and records the caller as its owner.
+///
+/// The ownership row is written in a transaction that the engine create runs inside. If the
+/// engine refuses, nothing is recorded. If the commit fails after the engine created the
+/// repository, the repository exists with no owner row, so no credential can reach it; a
+/// reconciliation pass can remove such repositories later.
+pub async fn create_workspace(
+    DualUser(user): DualUser,
+    State(state): State<AppState>,
+    Json(input): Json<WorkspaceRequest>,
+) -> Result<(StatusCode, Json<Workspace>), StatusCode> {
+    crate::uploads::limit(&state, &user.user.id, "workspace-create").await?;
+    let name = input.name.trim();
+    if name.is_empty()
+        || name.chars().count() > 120
+        || name.chars().any(|character| character.is_control())
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let engine = state
+        .versioning
+        .engine
+        .clone()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+
+    let id_bytes: [u8; 16] = *uuid::Uuid::new_v4().as_bytes();
+    let repository_id = hex::encode(id_bytes);
+    let mut tx = state
+        .pool
+        .begin()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let workspace_id: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO versioning_workspaces (owner_user_id, lore_repository_id, name) \
+         VALUES ($1, $2, $3) RETURNING id",
+    )
+    .bind(&user.user.id)
+    .bind(&repository_id)
+    .bind(name)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // The engine's own name for the repository, which never collides with another workspace
+    // because it is derived from the unique id.
+    let engine_name = format!("ws-{repository_id}");
+    if let Err(status) = engine
+        .create_repository(id_bytes, &engine_name, &user.user.id)
+        .await
+    {
+        // Dropping the transaction rolls the ownership row back.
+        return Err(match status.code() {
+            cloud_versioning::tonic::Code::AlreadyExists => StatusCode::CONFLICT,
+            cloud_versioning::tonic::Code::InvalidArgument => StatusCode::BAD_REQUEST,
+            cloud_versioning::tonic::Code::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        });
+    }
+    tx.commit()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(Workspace {
+            id: workspace_id,
+            repository_id,
+            name: name.to_string(),
+        }),
+    ))
+}
+
+/// The versioning routes: the public key set, native credential issue, and workspace creation.
 pub fn routes() -> axum::Router<AppState> {
     use axum::routing::{get, post};
     axum::Router::new()
@@ -148,5 +251,9 @@ pub fn routes() -> axum::Router<AppState> {
         .route(
             "/api/versioning/v1/native-credentials",
             post(issue).layer(axum::middleware::map_response(crate::sync::no_store)),
+        )
+        .route(
+            "/api/versioning/v1/workspaces",
+            post(create_workspace).layer(axum::middleware::map_response(crate::sync::no_store)),
         )
 }

@@ -73,8 +73,8 @@ use std::{error::Error, sync::Arc};
 
 #[derive(Clone)]
 struct AppState {
-    /// Signs native credentials for the versioning engine. See `versioning`.
-    versioning: Arc<cloud_versioning::bridge::CredentialBridge>,
+    /// Native credentials and the engine this process runs. See `versioning`.
+    versioning: Arc<versioning::Versioning>,
     peer: remote::peers::PeerConfig,
     auth: AuthContext,
     pool: PgPool,
@@ -677,12 +677,27 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .map(config::StorageConfig::build)
         .transpose()?;
     let hsts = config.origin.starts_with("https://");
+    // The versioning engine runs in this process only when its data directory is configured.
+    // Native listeners stay off: the backend's routes are the public surface.
+    let versioning_engine = match std::env::var("REMAKE_VERSIONING_DATA_DIR") {
+        Ok(dir) if !dir.is_empty() => Some(Arc::new(
+            cloud_versioning::VersioningHost::start(cloud_versioning::VersioningConfig {
+                data_dir: dir.into(),
+                native_listen: None,
+                native_auth: None,
+            })
+            .await
+            .map_err(|error| std::io::Error::other(format!("{error:#}")))?,
+        )),
+        _ => None,
+    };
     let mut app = app_inner(
         context,
         pool,
         auth,
         object_storage,
         RouterFlags {
+            engine: versioning_engine,
             peer: config.peer,
             trusted_proxy_cidrs: config.trusted_proxy_cidrs,
             step_up_oauth,
@@ -747,7 +762,33 @@ fn app_with_peer(
         auth,
         None,
         RouterFlags {
+            engine: None,
             peer,
+            trusted_proxy_cidrs: Vec::new(),
+            step_up_oauth: None,
+            social_limit_enabled: false,
+            hsts: false,
+            temporary_log_approvals: false,
+        },
+    )
+}
+
+/// The router with a versioning engine attached, for tests of workspace creation.
+#[cfg(test)]
+fn app_with_engine(
+    context: AuthContext,
+    pool: PgPool,
+    auth: AuthRouter,
+    engine: Option<Arc<cloud_versioning::VersioningHost>>,
+) -> Router {
+    app_inner(
+        context,
+        pool,
+        auth,
+        None,
+        RouterFlags {
+            engine,
+            peer: remote::peers::PeerConfig::default(),
             trusted_proxy_cidrs: Vec::new(),
             step_up_oauth: None,
             social_limit_enabled: false,
@@ -770,6 +811,7 @@ fn app_with_storage(
         auth,
         object_storage,
         RouterFlags {
+            engine: None,
             peer: remote::peers::PeerConfig::default(),
             trusted_proxy_cidrs: Vec::new(),
             step_up_oauth: None,
@@ -781,6 +823,9 @@ fn app_with_storage(
 }
 
 struct RouterFlags {
+    /// The versioning engine this process runs, when it is configured. `None` answers workspace
+    /// creation with 503 rather than writing ownership the engine does not hold.
+    engine: Option<Arc<cloud_versioning::VersioningHost>>,
     peer: remote::peers::PeerConfig,
     trusted_proxy_cidrs: Vec<ipnet::IpNet>,
     step_up_oauth: Option<step_up::StepUpOAuth>,
@@ -809,6 +854,7 @@ fn app_with_proxies(
         auth,
         object_storage,
         RouterFlags {
+            engine: None,
             peer: remote::peers::PeerConfig::default(),
             trusted_proxy_cidrs,
             step_up_oauth,
@@ -1159,7 +1205,9 @@ fn app_inner(
         .merge(v3_routes())
         .merge(versioning::routes())
         .with_state(AppState {
-            versioning: versioning::bridge().expect("the versioning credential key"),
+            versioning: Arc::new(
+                versioning::Versioning::new(flags.engine).expect("the versioning credential key"),
+            ),
             peer: flags.peer,
             auth: context,
             pool,

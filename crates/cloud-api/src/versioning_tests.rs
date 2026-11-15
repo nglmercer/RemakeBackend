@@ -25,9 +25,17 @@ struct Fixture {
     router: Router,
     pool: PgPool,
     users: Vec<User>,
+    /// The engine this fixture's router serves, when it was given one.
+    engine: Option<Arc<cloud_versioning::VersioningHost>>,
+    /// Keeps the engine's data directory alive for the fixture's lifetime.
+    _data: Option<tempfile::TempDir>,
 }
 
 async fn fixture(users_wanted: usize) -> Fixture {
+    fixture_with(users_wanted, true).await
+}
+
+async fn fixture_with(users_wanted: usize, with_engine: bool) -> Fixture {
     let database = crate::test_support::migrated_url();
     let adapter = Arc::new(SqlxDbAdapter::postgres(&database).await.unwrap());
     let secondary = Arc::new(SqlxSecondaryStorage::postgres(&database).await.unwrap());
@@ -74,16 +82,31 @@ async fn fixture(users_wanted: usize) -> Fixture {
             cookie: format!("{}={}", user.cookie.name, user.cookie.value),
         });
     }
-    let router = crate::app_with_peer(
+    let (engine, data) = if with_engine {
+        let data = tempfile::tempdir().unwrap();
+        let engine = cloud_versioning::VersioningHost::start(cloud_versioning::VersioningConfig {
+            data_dir: data.path().to_path_buf(),
+            native_listen: None,
+            native_auth: None,
+        })
+        .await
+        .unwrap();
+        (Some(Arc::new(engine)), Some(data))
+    } else {
+        (None, None)
+    };
+    let router = crate::app_with_engine(
         context.clone(),
         pool.clone(),
         AuthRouter::new(context.clone()).unwrap(),
-        crate::remote::peers::PeerConfig::default(),
+        engine.clone(),
     );
     Fixture {
         router,
         pool,
         users,
+        engine,
+        _data: data,
     }
 }
 
@@ -92,6 +115,16 @@ async fn call(
     user: Option<usize>,
     method: &str,
     path: &str,
+) -> (StatusCode, HeaderMap, Value) {
+    call_with_body(f, user, method, path, None).await
+}
+
+async fn call_with_body(
+    f: &Fixture,
+    user: Option<usize>,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
 ) -> (StatusCode, HeaderMap, Value) {
     let mut request = Request::builder()
         .method(method)
@@ -102,10 +135,14 @@ async fn call(
             .header(header::COOKIE, &f.users[user].cookie)
             .header(header::ORIGIN, ORIGIN);
     }
+    let body = match body {
+        Some(value) => Body::from(value.to_string()),
+        None => Body::empty(),
+    };
     let response = f
         .router
         .clone()
-        .oneshot(request.body(Body::empty()).unwrap())
+        .oneshot(request.body(body).unwrap())
         .await
         .unwrap();
     let status = response.status();
@@ -246,4 +283,105 @@ async fn register_workspace_for(f: &Fixture, user: usize, repository: &str) -> u
     versioning::register_workspace(&f.pool, &f.users[user].id, repository, "Workspace")
         .await
         .expect("a well-formed ownership row")
+}
+
+/// Creates a workspace as the given user, returning the status and the response document.
+async fn create_workspace(f: &Fixture, user: usize, name: &str) -> (StatusCode, Value) {
+    let (status, _, body) = call_with_body(
+        f,
+        Some(user),
+        "POST",
+        "/api/versioning/v1/workspaces",
+        Some(json!({ "name": name })),
+    )
+    .await;
+    (status, body)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn creating_a_workspace_requires_an_authenticated_account() {
+    let f = fixture(1).await;
+    let (status, _, _) = call_with_body(
+        &f,
+        None,
+        "POST",
+        "/api/versioning/v1/workspaces",
+        Some(json!({ "name": "stream" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_workspace_is_created_in_the_engine_and_owned_by_its_creator() {
+    let f = fixture(2).await;
+    let (status, created) = create_workspace(&f, 0, "  Stream overlays  ").await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let repository_id = created["repositoryId"].as_str().unwrap().to_string();
+    assert_eq!(repository_id.len(), 32);
+    assert!(repository_id
+        .bytes()
+        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+    assert_eq!(created["name"], "Stream overlays", "the name is trimmed");
+
+    // The engine holds the repository under the name the backend derived from its id: a create
+    // with that name succeeds as an early success, and another name is refused as taken.
+    let engine = f.engine.clone().expect("the fixture has an engine");
+    let id: [u8; 16] = hex::decode(&repository_id).unwrap().try_into().unwrap();
+    engine
+        .create_repository(id, &format!("ws-{repository_id}"), &f.users[0].id)
+        .await
+        .expect("the engine holds the repository under the derived name");
+    let taken = engine
+        .create_repository(id, "some-other-name", &f.users[0].id)
+        .await
+        .expect_err("the id is taken by the workspace's repository");
+    assert_eq!(taken.code(), cloud_versioning::tonic::Code::AlreadyExists);
+
+    // The owner's credential now names the repository, with the owner actions on it only.
+    let issued = issue(&f, 0).await;
+    assert_eq!(issued.repositories, vec![repository_id.clone()]);
+    let key = published_key(&f).await;
+    let claims = jsonwebtoken::decode::<Value>(&issued.token, &key, &native_validation())
+        .unwrap()
+        .claims;
+    assert_eq!(
+        claims["resources"],
+        json!([{ "resource_id": format!("urc-{repository_id}"), "permission": ["read", "write"] }])
+    );
+    // The other account holds no grant on it.
+    assert!(issue(&f, 1).await.repositories.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn each_workspace_gets_its_own_repository() {
+    let f = fixture(1).await;
+    let (_, first) = create_workspace(&f, 0, "first").await;
+    let (_, second) = create_workspace(&f, 0, "second").await;
+    assert_ne!(first["repositoryId"], second["repositoryId"]);
+    assert_eq!(issue(&f, 0).await.repositories.len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_workspace_name_is_checked_before_anything_is_written() {
+    let f = fixture(1).await;
+    for name in ["", "   ", "tab\there", &"x".repeat(121)] {
+        let (status, _) = create_workspace(&f, 0, name).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "name {name:?}");
+    }
+    assert!(
+        issue(&f, 0).await.repositories.is_empty(),
+        "no ownership was recorded"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn workspace_creation_is_unavailable_without_an_engine() {
+    let f = fixture_with(1, false).await;
+    let (status, _) = create_workspace(&f, 0, "stream").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        issue(&f, 0).await.repositories.is_empty(),
+        "nothing was recorded without an engine"
+    );
 }
