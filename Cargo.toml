@@ -24,5 +24,5 @@ opt-level = 3
 # workspace, so the consuming workspace repeats them, at the same Lore revision as the
 # dependency in crates/cloud-versioning. See docs/VERSIONING-BUILD.md.
 [patch.crates-io]
-quinn-proto = { git = "https://github.com/nglmercer/lore.git", rev = "603fa111939fab8f560d0e6c97dd27a50f73474a" }
-glob-match = { git = "https://github.com/nglmercer/lore.git", rev = "603fa111939fab8f560d0e6c97dd27a50f73474a" }
+quinn-proto = { git = "https://github.com/nglmercer/lore.git", rev = "0d64e1d41d36ef831e4dd60a1a2f8bfb2748beff" }
+glob-match = { git = "https://github.com/nglmercer/lore.git", rev = "0d64e1d41d36ef831e4dd60a1a2f8bfb2748beff" }

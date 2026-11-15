@@ -23,11 +23,11 @@ Lore's two workspace patches from the same revision, because Cargo does not appl
 own `[patch]` section to its consumer:
 
 ```toml
-lore-server = { git = "https://github.com/nglmercer/lore.git", rev = "603fa111..." }
+lore-server = { git = "https://github.com/nglmercer/lore.git", rev = "0d64e1d4..." }
 
 [patch.crates-io]
-quinn-proto = { git = "https://github.com/nglmercer/lore.git", rev = "603fa111..." }
-glob-match = { git = "https://github.com/nglmercer/lore.git", rev = "603fa111..." }
+quinn-proto = { git = "https://github.com/nglmercer/lore.git", rev = "0d64e1d4..." }
+glob-match = { git = "https://github.com/nglmercer/lore.git", rev = "0d64e1d4..." }
 ```
 
 Cargo finds `lore-server` and the two vendored crates inside the repository by package name.
@@ -55,7 +55,7 @@ ahead of the baseline (both in `lore-revision`) when the fork was made.
 
 ## What exists
 
-Lore fork (`nglmercer/lore`, branch `remake/embedding`, commit `603fa111`):
+Lore fork (`nglmercer/lore`, branch `remake/embedding`, commit `0d64e1d4`):
 
 - `lore_server::server::EmbeddedServer`: starts the server inside a host runtime, leaves the
   tracing subscriber and process signals to the host, serves until stopped, and restarts in the
@@ -124,10 +124,17 @@ build. Results:
 | Restart with history | Survives a graceful stop. |
 | `SIGKILL` right after an acknowledged push | **Lost** with Lore's default flush delay; survives after the `[server] durable_publication = true` fork change (2/2). Survives a kill 14 s later without it. |
 | 1 GiB file | Push 5 s, clone 19 s, SHA-256 identical. Server peak RSS 327 MB (push) and 824 MB (clone) against a 253 MB baseline; the clone figure may include mapped store pages and needs a proper measurement before promising a memory budget. |
-| Authenticated native endpoints | The server starts with `[server.auth]` + `external_credentials`, verifying Ed25519 JWTs from the bridge's key set. **Not yet passing:** `repository create` with a valid service token answers `Not authenticated: authorization header required`, so the CLI does not send `--access-token` on this call, or expects the identity-token exchange. Isolation, read-only and tampered-token cases are scripted but unproven. |
+| Authenticated native endpoints, creation | Works: `repository create` with a bridge token passed as `--identity-token` succeeds. The token must go in `--identity-token` (the flags are mutually exclusive with `--identity`): `--access-token` alone sends no authentication token, and the unscoped create service refuses that. |
+| Lore transport fix (`0d64e1d4`) | A supplied `--access-token` without a named identity was dropped and sent no authorization. Fixed, with a failing-then-passing test; the transport unit suite passes (391/391). |
+| Authenticated push and clone, repository-scoped | **Blocked.** Push fails with `Not authorized to access repository` when opening the QUIC storage session, and a clone fails with `Repository not found` at the repository lookup. This happens for an exact repository grant and for a wildcard `urc-*` grant with `read,write`, so the cause is not the repository matching. The server logs no denial reason at the default level. Open question: which token the storage session presents and how `ResourceGrantsAuthorizer` judges it. |
+| Isolation (another account, read-only, tampered token) | Not evaluated: the positive case is blocked, so the negative cases prove nothing yet. The scripts are in the session scratchpad, not in the repository. |
 
-Verdict so far: the transport, conflict detection, history, large-file and durability behavior are
-viable on the embedded engine. The remaining open risk is how the CLI presents the bridge token;
-resolve it (try `LORE_ACCESS_TOKEN` and `--identity-token`, read `lore-transport` authorization
-header construction) before building the policy and routes. Not run: Better Auth session to token
-minting, the v2 migration, the SDKs and the `/api/versioning/v1` routes.
+Verdict: the embedded engine is viable for the parts already measured (transport, conflict
+detection, history, large-file transfer, durability). Whether **the native Lore CLI can be used
+for authenticated repository access on this engine is not yet established**: the create path works,
+the repository-scoped path does not. Resolving the storage-session denial is the next blocker, and
+the authorization model (`resources` claim, identity-token versus access-token roles) must be settled
+before policy and routes are built on it.
+
+Not run: the Better Auth session to token minting, the v2 migration, the SDKs and the
+`/api/versioning/v1` routes.
