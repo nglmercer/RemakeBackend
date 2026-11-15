@@ -212,6 +212,27 @@ impl VersioningHost {
             .map(|_| ())
     }
 
+    /// The revision a branch of repository `id` points at, as its hexadecimal id, or `None` when
+    /// the branch does not exist or has no revision yet. The host must have authorized the caller
+    /// for the repository before calling this.
+    ///
+    /// # Errors
+    ///
+    /// Returns the status the engine reports when its stores fail to answer.
+    pub async fn branch_head(
+        &self,
+        id: [u8; 16],
+        branch: &str,
+    ) -> Result<Option<String>, tonic::Status> {
+        let admin = self
+            .server
+            .stores()
+            .repositories
+            .as_ref()
+            .ok_or_else(|| tonic::Status::unavailable("the engine serves no repository"))?;
+        admin.branch_head(id, branch).await
+    }
+
     /// Whether the engine can serve right now.
     #[must_use]
     pub fn health(&self) -> HostHealth {

@@ -9,8 +9,8 @@ description = "Embeds the Lore versioning engine in RemakeBackend and adapts Rem
 [dependencies]
 # Pinned to a revision of the nglmercer/lore fork (branch remake/embedding). Update the rev
 # together with the [patch.crates-io] revs in the root Cargo.toml; see docs/VERSIONING-BUILD.md.
-lore-proto = { git = "https://github.com/nglmercer/lore.git", rev = "bfde21b7020719d4a7043e3a0289cfc37ebe79a7" }
-lore-server = { git = "https://github.com/nglmercer/lore.git", rev = "bfde21b7020719d4a7043e3a0289cfc37ebe79a7" }
+lore-proto = { git = "https://github.com/nglmercer/lore.git", rev = "3c74aa6e443eca44ff3d4643ed9e081254a4b545" }
+lore-server = { git = "https://github.com/nglmercer/lore.git", rev = "3c74aa6e443eca44ff3d4643ed9e081254a4b545" }
 anyhow = "1"
 tonic = "0.14"
 # Credential bridge: Ed25519 signing and the JWT envelope for Lore's native endpoints.

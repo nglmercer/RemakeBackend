@@ -580,6 +580,66 @@ pub async fn list_workspaces(
     ))
 }
 
+/// The response for a branch head.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchHead {
+    branch: String,
+    /// The revision the branch points at, or `null` when it has none or does not exist.
+    revision: Option<String>,
+}
+
+/// The branch names a caller may ask for: the characters Lore accepts in a branch name, bounded.
+fn valid_branch_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 120
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'/'))
+}
+
+/// The head of one branch of a workspace the caller owns. A workspace the caller does not own is
+/// reported as not found, the same as one that does not exist, so the answer does not reveal
+/// which repositories exist.
+pub async fn branch_head(
+    DualUser(user): DualUser,
+    State(state): State<AppState>,
+    axum::extract::Path((workspace, branch)): axum::extract::Path<(uuid::Uuid, String)>,
+) -> Result<Json<BranchHead>, StatusCode> {
+    crate::uploads::limit(&state, &user.user.id, "branch-head").await?;
+    if !valid_branch_name(&branch) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let row = sqlx::query(
+        "SELECT lore_repository_id FROM versioning_workspaces \
+         WHERE id = $1 AND owner_user_id = $2 AND revoked_at IS NULL AND state = 'active'",
+    )
+    .bind(workspace)
+    .bind(&user.user.id)
+    .fetch_optional(&state.pool)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .ok_or(StatusCode::NOT_FOUND)?;
+    let repository_id: String = row.get("lore_repository_id");
+    let engine = state
+        .versioning
+        .engine()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let bytes: [u8; 16] = hex::decode(&repository_id)
+        .ok()
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let revision =
+        engine
+            .branch_head(bytes, &branch)
+            .await
+            .map_err(|status| match status.code() {
+                cloud_versioning::tonic::Code::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            })?;
+    Ok(Json(BranchHead { branch, revision }))
+}
+
 /// The versioning routes: the public key set, native credential issue, and workspace creation.
 pub fn routes() -> axum::Router<AppState> {
     use axum::routing::{get, post};
@@ -594,5 +654,9 @@ pub fn routes() -> axum::Router<AppState> {
             post(create_workspace)
                 .get(list_workspaces)
                 .layer(axum::middleware::map_response(crate::sync::no_store)),
+        )
+        .route(
+            "/api/versioning/v1/workspaces/{id}/branches/{branch}",
+            get(branch_head).layer(axum::middleware::map_response(crate::sync::no_store)),
         )
 }

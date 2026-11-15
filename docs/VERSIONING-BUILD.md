@@ -222,6 +222,10 @@ and the versioning repository routes.
 
 Done and verified in this pass:
 
+- **Branch head reads.** The engine's in-process admin reads a branch head with the branch RPCs'
+  name mapping and head, and the route above exposes it. Verified against a workspace after a real
+  CLI push: the route returns the revision the push reported.
+
 - **Pending-state creation.** A workspace is recorded as `pending` before the engine creates its
   repository, and becomes `active` only after the engine confirms it. Credentials and the workspace
   list name only active workspaces. The pending row is the intent record, so the engine cannot hold a
@@ -241,8 +245,10 @@ Done and verified in this pass:
 
 Still not done, and not part of the reduced objective:
 
-- Repository, reference and commit routes under `/api/versioning/v1`. Reading branch heads and
-  history in process needs read methods on the engine's in-process admin, which do not exist yet.
+- Repository, reference and commit routes under `/api/versioning/v1`. Branch heads are read now
+  (`GET /api/versioning/v1/workspaces/{id}/branches/{branch}`, owner only, absent revision as
+  `null`, other accounts answered as not found). Revision history, diffs and publication through the
+  API are not done.
 - The v2 migration. Its inventory, import, writer fencing, cutover and recovery are not started.
 - SDKs in Rust, TypeScript and Python.
 - The product CLI with the brief's commands.

@@ -461,3 +461,38 @@ async fn a_revoked_workspace_is_not_listed() {
     assert!(versioning::revoke_workspace(&f.pool, id).await.unwrap());
     assert!(list(&f, 0).await.is_empty());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_branch_head_is_read_for_the_owner_and_hidden_from_others() {
+    let f = fixture(2).await;
+    let (_, created) = create_workspace(&f, 0, "heads").await;
+    let id = created["id"].as_str().unwrap().to_string();
+    let path = format!("/api/versioning/v1/workspaces/{id}/branches/main");
+
+    // A new workspace's main branch has no revision yet.
+    let (status, _, body) = call(&f, Some(0), "GET", &path).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["branch"], "main");
+    assert!(body["revision"].is_null());
+
+    // Another account gets the same answer as for a workspace that does not exist.
+    let (other, _, _) = call(&f, Some(1), "GET", &path).await;
+    let (missing, _, _) = call(
+        &f,
+        Some(0),
+        "GET",
+        "/api/versioning/v1/workspaces/00000000-0000-0000-0000-000000000000/branches/main",
+    )
+    .await;
+    assert_eq!(other, StatusCode::NOT_FOUND);
+    assert_eq!(missing, StatusCode::NOT_FOUND);
+
+    let (status, _, _) = call(
+        &f,
+        Some(0),
+        "GET",
+        &format!("/api/versioning/v1/workspaces/{id}/branches/bad%20name"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
