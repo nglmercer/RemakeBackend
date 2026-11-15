@@ -680,11 +680,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // The versioning state exists before the engine. The engine starts after the listener serves,
     // since it fetches its keys from this process's own key set at startup.
     let versioning_state = Arc::new(versioning::Versioning::new(
-        versioning::bridge().map_err(std::io::Error::other)?,
+        versioning::bridge_from_env(|key| std::env::var(key).ok())
+            .map_err(std::io::Error::other)?,
     ));
     let versioning_data_dir = std::env::var("REMAKE_VERSIONING_DATA_DIR")
         .ok()
         .filter(|dir| !dir.is_empty());
+    let reconcile_pool = pool.clone();
     let mut app = app_inner(
         context,
         pool,
@@ -726,8 +728,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
         })
         .await
         .map_err(|error| std::io::Error::other(format!("{error:#}")))?;
-        versioning_state.set_engine(Arc::new(host));
+        let host = Arc::new(host);
+        versioning_state.set_engine(host.clone());
         tracing::info!("versioning engine started");
+        match versioning::reconcile(&reconcile_pool, &host).await {
+            Ok((activated, remaining)) => {
+                tracing::info!(activated, remaining, "versioning workspaces reconciled")
+            }
+            Err(error) => tracing::warn!(%error, "versioning reconciliation could not run"),
+        }
     }
     let result = serving.await;
     if let Some(host) = versioning_state.take_engine() {

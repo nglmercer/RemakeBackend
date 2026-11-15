@@ -19,7 +19,7 @@ use axum::{
 };
 use cloud_versioning::bridge::{CredentialBridge, RepositoryGrant};
 use serde::Serialize;
-use sqlx::Row;
+use sqlx::{PgPool, Row};
 use std::sync::Arc;
 
 use crate::dual_auth::DualUser;
@@ -188,6 +188,47 @@ mod config_tests {
         assert_eq!(auth.audience, AUDIENCE);
     }
 
+    /// A key file is created on first use and reloaded afterwards, so the public key set, and
+    /// with it every token issued before a restart, is unchanged.
+    #[test]
+    fn a_signing_key_file_is_created_once_and_reloaded() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("signing.der");
+        let path_text = path.to_str().unwrap().to_string();
+        let first = bridge_from_env(|key| {
+            (key == "REMAKE_VERSIONING_SIGNING_KEY_FILE").then(|| path_text.clone())
+        })
+        .unwrap();
+        assert!(path.exists(), "the key file is created");
+        let second = bridge_from_env(|key| {
+            (key == "REMAKE_VERSIONING_SIGNING_KEY_FILE").then(|| path_text.clone())
+        })
+        .unwrap();
+        assert_eq!(first.jwks_json(), second.jwks_json());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_signing_key_file_is_readable_only_by_its_owner() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("signing.der");
+        let path_text = path.to_str().unwrap().to_string();
+        bridge_from_env(|key| {
+            (key == "REMAKE_VERSIONING_SIGNING_KEY_FILE").then(|| path_text.clone())
+        })
+        .unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn without_a_key_file_the_key_is_generated_per_process() {
+        let first = bridge_from_env(|_| None).unwrap();
+        let second = bridge_from_env(|_| None).unwrap();
+        assert_ne!(first.jwks_json(), second.jwks_json());
+    }
+
     #[test]
     fn a_malformed_listen_address_is_refused() {
         let bridge = bridge().unwrap();
@@ -197,6 +238,51 @@ mod config_tests {
         )
         .is_err());
     }
+}
+
+/// Builds the bridge for this process from the environment.
+///
+/// `REMAKE_VERSIONING_SIGNING_KEY_FILE` names a file holding the PKCS#8 Ed25519 key. When the
+/// file exists it is loaded, so a restart and every process that shares it verify the same tokens.
+/// When it does not exist a key is generated and written there with owner-only permissions. When
+/// the variable is unset the key is generated for this process only, which is the default.
+pub fn bridge_from_env(
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<Arc<CredentialBridge>, String> {
+    let Some(path) = lookup("REMAKE_VERSIONING_SIGNING_KEY_FILE").filter(|p| !p.trim().is_empty())
+    else {
+        return bridge();
+    };
+    let path = std::path::PathBuf::from(path);
+    if path.exists() {
+        let der =
+            std::fs::read(&path).map_err(|error| format!("reading the signing key: {error}"))?;
+        return CredentialBridge::from_pkcs8_der(&der, ISSUER, AUDIENCE)
+            .map(Arc::new)
+            .map_err(|error| format!("{error:#}"));
+    }
+    let generated =
+        CredentialBridge::generate(ISSUER, AUDIENCE).map_err(|error| format!("{error:#}"))?;
+    write_owner_only(&path, generated.pkcs8_der())?;
+    Ok(Arc::new(generated))
+}
+
+/// Creates `path` exclusively with owner-only permissions and writes `bytes` into it.
+fn write_owner_only(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|error| format!("creating the signing key file: {error}"))?;
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|error| format!("writing the signing key file: {error}"))
 }
 
 /// Builds the bridge that signs native tokens for this process.
@@ -237,7 +323,7 @@ pub async fn issue(
     crate::uploads::limit(&state, &user.user.id, "native-credential").await?;
     let rows = sqlx::query(
         "SELECT lore_repository_id FROM versioning_workspaces \
-         WHERE owner_user_id = $1 AND revoked_at IS NULL \
+         WHERE owner_user_id = $1 AND revoked_at IS NULL AND state = 'active' \
          ORDER BY created_at, id",
     )
     .bind(&user.user.id)
@@ -317,12 +403,21 @@ pub struct Workspace {
     name: String,
 }
 
-/// Creates a repository in the engine and records the caller as its owner.
+/// The engine's name for a workspace's repository. It is derived from the unique id, so it never
+/// collides with another workspace.
+fn engine_name(repository_id: &str) -> String {
+    format!("ws-{repository_id}")
+}
+
+/// Creates a workspace in two steps the reconciliation pass can always finish.
 ///
-/// The ownership row is written in a transaction that the engine create runs inside. If the
-/// engine refuses, nothing is recorded. If the commit fails after the engine created the
-/// repository, the repository exists with no owner row, so no credential can reach it; a
-/// reconciliation pass can remove such repositories later.
+/// 1. The workspace is recorded as `pending`, committed on its own, before the engine is touched.
+/// 2. The engine creates the repository.
+/// 3. The row becomes `active`, and only then can credentials name it.
+///
+/// A refused engine create removes the pending row. If that removal fails, or the activation fails
+/// after the engine created the repository, the row stays pending and [`reconcile`] completes it.
+/// So the engine never holds a repository without a row that records its owner.
 pub async fn create_workspace(
     DualUser(user): DualUser,
     State(state): State<AppState>,
@@ -343,30 +438,28 @@ pub async fn create_workspace(
 
     let id_bytes: [u8; 16] = *uuid::Uuid::new_v4().as_bytes();
     let repository_id = hex::encode(id_bytes);
-    let mut tx = state
-        .pool
-        .begin()
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let workspace_id: uuid::Uuid = sqlx::query_scalar(
-        "INSERT INTO versioning_workspaces (owner_user_id, lore_repository_id, name) \
-         VALUES ($1, $2, $3) RETURNING id",
+        "INSERT INTO versioning_workspaces (owner_user_id, lore_repository_id, name, state) \
+         VALUES ($1, $2, $3, 'pending') RETURNING id",
     )
     .bind(&user.user.id)
     .bind(&repository_id)
     .bind(name)
-    .fetch_one(&mut *tx)
+    .fetch_one(&state.pool)
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // The engine's own name for the repository, which never collides with another workspace
-    // because it is derived from the unique id.
-    let engine_name = format!("ws-{repository_id}");
     if let Err(status) = engine
-        .create_repository(id_bytes, &engine_name, &user.user.id)
+        .create_repository(id_bytes, &engine_name(&repository_id), &user.user.id)
         .await
     {
-        // Dropping the transaction rolls the ownership row back.
+        // A refused create leaves no workspace. If the removal itself fails, the row stays pending
+        // and reconciliation retries the create, which for a refused name is a permanent refusal
+        // that removes it.
+        let _ = sqlx::query("DELETE FROM versioning_workspaces WHERE id = $1")
+            .bind(workspace_id)
+            .execute(&state.pool)
+            .await;
         return Err(match status.code() {
             cloud_versioning::tonic::Code::AlreadyExists => StatusCode::CONFLICT,
             cloud_versioning::tonic::Code::InvalidArgument => StatusCode::BAD_REQUEST,
@@ -374,7 +467,11 @@ pub async fn create_workspace(
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         });
     }
-    tx.commit()
+    // The engine holds the repository. Until this succeeds the row stays pending, and the caller
+    // gets an error that says the workspace is not usable yet.
+    sqlx::query("UPDATE versioning_workspaces SET state = 'active' WHERE id = $1")
+        .bind(workspace_id)
+        .execute(&state.pool)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok((
@@ -384,6 +481,102 @@ pub async fn create_workspace(
             repository_id,
             name: name.to_string(),
         }),
+    ))
+}
+
+/// Completes workspaces left pending by a failed step of [`create_workspace`].
+///
+/// For each pending row the engine create is repeated. It is idempotent for the same id and name,
+/// so a repository the engine already holds is simply confirmed. A row the engine refuses as
+/// invalid is removed. Other failures leave the row pending for the next pass.
+///
+/// Returns how many workspaces became active and how many remain pending.
+pub async fn reconcile(
+    pool: &PgPool,
+    engine: &cloud_versioning::VersioningHost,
+) -> Result<(usize, usize), sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT id, owner_user_id, lore_repository_id FROM versioning_workspaces \
+         WHERE state = 'pending' ORDER BY created_at, id",
+    )
+    .fetch_all(pool)
+    .await?;
+    let (mut activated, mut remaining) = (0, 0);
+    for row in rows {
+        let id: uuid::Uuid = row.get("id");
+        let owner: String = row.get("owner_user_id");
+        let repository_id: String = row.get("lore_repository_id");
+        let Ok(bytes) = hex::decode(&repository_id) else {
+            remaining += 1;
+            continue;
+        };
+        let Ok(id_bytes) = <[u8; 16]>::try_from(bytes.as_slice()) else {
+            remaining += 1;
+            continue;
+        };
+        match engine
+            .create_repository(id_bytes, &engine_name(&repository_id), &owner)
+            .await
+        {
+            Ok(()) => {
+                sqlx::query("UPDATE versioning_workspaces SET state = 'active' WHERE id = $1")
+                    .bind(id)
+                    .execute(pool)
+                    .await?;
+                activated += 1;
+            }
+            Err(status) if status.code() == cloud_versioning::tonic::Code::InvalidArgument => {
+                sqlx::query("DELETE FROM versioning_workspaces WHERE id = $1")
+                    .bind(id)
+                    .execute(pool)
+                    .await?;
+            }
+            Err(status) => {
+                tracing::warn!(
+                    workspace = %id,
+                    code = ?status.code(),
+                    "a pending workspace could not be completed; it stays pending"
+                );
+                remaining += 1;
+            }
+        }
+    }
+    Ok((activated, remaining))
+}
+
+/// One workspace the caller owns.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceSummary {
+    id: uuid::Uuid,
+    repository_id: String,
+    name: String,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// The caller's active workspaces, oldest first. Pending and revoked workspaces are not listed.
+pub async fn list_workspaces(
+    DualUser(user): DualUser,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<WorkspaceSummary>>, StatusCode> {
+    let rows = sqlx::query(
+        "SELECT id, lore_repository_id, name, created_at FROM versioning_workspaces \
+         WHERE owner_user_id = $1 AND revoked_at IS NULL AND state = 'active' \
+         ORDER BY created_at, id",
+    )
+    .bind(&user.user.id)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(
+        rows.iter()
+            .map(|row| WorkspaceSummary {
+                id: row.get("id"),
+                repository_id: row.get("lore_repository_id"),
+                name: row.get("name"),
+                created_at: row.get("created_at"),
+            })
+            .collect(),
     ))
 }
 
@@ -398,6 +591,8 @@ pub fn routes() -> axum::Router<AppState> {
         )
         .route(
             "/api/versioning/v1/workspaces",
-            post(create_workspace).layer(axum::middleware::map_response(crate::sync::no_store)),
+            post(create_workspace)
+                .get(list_workspaces)
+                .layer(axum::middleware::map_response(crate::sync::no_store)),
         )
 }

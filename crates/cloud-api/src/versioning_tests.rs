@@ -385,3 +385,79 @@ async fn workspace_creation_is_unavailable_without_an_engine() {
         "nothing was recorded without an engine"
     );
 }
+
+async fn list(f: &Fixture, user: usize) -> Vec<Value> {
+    let (status, _, body) = call(f, Some(user), "GET", "/api/versioning/v1/workspaces").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    body.as_array().cloned().expect("a list")
+}
+
+/// Records a pending workspace the way a create that stopped after its first step leaves one.
+async fn insert_pending(f: &Fixture, user: usize) -> String {
+    let repository_id = hex::encode(uuid::Uuid::new_v4().as_bytes());
+    sqlx::query(
+        "INSERT INTO versioning_workspaces (owner_user_id, lore_repository_id, name, state) \
+         VALUES ($1, $2, 'pending stream', 'pending')",
+    )
+    .bind(&f.users[user].id)
+    .bind(&repository_id)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    repository_id
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pending_workspace_grants_nothing_until_reconciliation_completes_it() {
+    let f = fixture(1).await;
+    let pending = insert_pending(&f, 0).await;
+
+    assert!(
+        issue(&f, 0).await.repositories.is_empty(),
+        "pending is not granted"
+    );
+    assert!(list(&f, 0).await.is_empty(), "pending is not listed");
+
+    let engine = f.engine.clone().expect("the fixture has an engine");
+    let (activated, remaining) = versioning::reconcile(&f.pool, &engine).await.unwrap();
+    assert_eq!((activated, remaining), (1, 0));
+
+    assert_eq!(issue(&f, 0).await.repositories, vec![pending.clone()]);
+    // The engine holds it under the derived name: the create is an early success with that name.
+    let id: [u8; 16] = hex::decode(&pending).unwrap().try_into().unwrap();
+    engine
+        .create_repository(id, &format!("ws-{pending}"), &f.users[0].id)
+        .await
+        .expect("the reconciled repository exists in the engine");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_workspace_list_shows_only_the_callers_active_workspaces() {
+    let f = fixture(2).await;
+    let (_, first) = create_workspace(&f, 0, "first").await;
+    let (_, second) = create_workspace(&f, 0, "second").await;
+    let (_, other) = create_workspace(&f, 1, "theirs").await;
+
+    let mine = list(&f, 0).await;
+    assert_eq!(mine.len(), 2);
+    assert_eq!(mine[0]["id"], first["id"]);
+    assert_eq!(mine[1]["id"], second["id"]);
+    assert!(mine.iter().all(|w| w["id"] != other["id"]));
+    assert!(
+        mine[0]["createdAt"].is_string(),
+        "creation time is reported"
+    );
+
+    let theirs = list(&f, 1).await;
+    assert_eq!(theirs.len(), 1);
+    assert_eq!(theirs[0]["id"], other["id"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_revoked_workspace_is_not_listed() {
+    let f = fixture(1).await;
+    let (_, created) = create_workspace(&f, 0, "stream").await;
+    let id: uuid::Uuid = created["id"].as_str().unwrap().parse().unwrap();
+    assert!(versioning::revoke_workspace(&f.pool, id).await.unwrap());
+    assert!(list(&f, 0).await.is_empty());
+}

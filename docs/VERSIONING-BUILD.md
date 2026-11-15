@@ -217,3 +217,37 @@ is refused, since the signing key is per process; a new credential from the same
 Not yet covered by this run: a crash during publication and its recovery by operation ID, a
 resumable upload of a large file, a multi-commit offline sequence, a second SDK, the v2 migration,
 and the versioning repository routes.
+
+## Roadmap status after the latest pass
+
+Done and verified in this pass:
+
+- **Pending-state creation.** A workspace is recorded as `pending` before the engine creates its
+  repository, and becomes `active` only after the engine confirms it. Credentials and the workspace
+  list name only active workspaces. The pending row is the intent record, so the engine cannot hold a
+  repository that no row records.
+- **Reconciliation of unfinished workspaces.** At startup, after the engine starts, every pending row
+  is retried. The engine create is idempotent for the same id and name, so a repository already held is
+  confirmed. Rows the engine refuses as invalid are removed. Others stay pending and are logged.
+  Tested with a pending row inserted the way a stopped create leaves one.
+- **Workspace listing.** `GET /api/versioning/v1/workspaces` lists the caller's active workspaces,
+  oldest first. Pending and revoked ones are excluded.
+- **Persistent signing key.** `REMAKE_VERSIONING_SIGNING_KEY_FILE` loads the PKCS#8 Ed25519 key, or
+  creates it with owner-only permissions on first use. Verified end to end: a token issued before a
+  graceful restart still works after it, and a large file pushed before the restart is cloned intact.
+  Without the variable the key is per process, as before.
+- **Backend-engine start order.** The engine starts after the HTTP listener serves, because it
+  fetches its keys from that listener at startup.
+
+Still not done, and not part of the reduced objective:
+
+- Repository, reference and commit routes under `/api/versioning/v1`. Reading branch heads and
+  history in process needs read methods on the engine's in-process admin, which do not exist yet.
+- The v2 migration. Its inventory, import, writer fencing, cutover and recovery are not started.
+- SDKs in Rust, TypeScript and Python.
+- The product CLI with the brief's commands.
+- Recoverable publication by operation ID, with a crash between the engine publish and the SQL receipt.
+- Resumable uploads of large files.
+- Revocation of issued credentials before they expire. The mitigation is the 300-second lifetime,
+  because the engine verifies tokens itself and offers no deny list. The key file also shares one
+  key across processes that share the file, but distributing it across hosts is not implemented.

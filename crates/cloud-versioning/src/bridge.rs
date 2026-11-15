@@ -16,7 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use ed25519_dalek::pkcs8::EncodePrivateKey;
+use ed25519_dalek::pkcs8::{DecodePrivateKey, EncodePrivateKey};
 use ed25519_dalek::SigningKey;
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde::Serialize;
@@ -56,6 +56,7 @@ pub struct CredentialBridge {
     key_id: String,
     encoding_key: EncodingKey,
     public_x: String,
+    signing_der: Vec<u8>,
 }
 
 impl CredentialBridge {
@@ -73,6 +74,21 @@ impl CredentialBridge {
         let der = signing_key
             .to_pkcs8_der()
             .context("encoding the signing key")?;
+        Self::from_pkcs8_der(der.as_bytes(), issuer, audience)
+    }
+
+    /// Creates a bridge that signs with the key in `der`, a PKCS#8 Ed25519 private key.
+    ///
+    /// A host that runs several processes, or restarts, loads one key here so that every process
+    /// verifies the tokens the others issue. The key is secret: it must not be logged or stored
+    /// where clients can read it.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `der` is not an Ed25519 PKCS#8 private key.
+    pub fn from_pkcs8_der(der: &[u8], issuer: &str, audience: &str) -> Result<Self> {
+        let signing_key =
+            SigningKey::from_pkcs8_der(der).context("decoding the Ed25519 signing key")?;
         let public = signing_key.verifying_key();
         let public_x = URL_SAFE_NO_PAD.encode(public.as_bytes());
         // The key id is derived from the public key, so it changes with the key.
@@ -81,9 +97,16 @@ impl CredentialBridge {
             issuer: issuer.to_string(),
             audience: audience.to_string(),
             key_id,
-            encoding_key: EncodingKey::from_ed_der(der.as_bytes()),
+            encoding_key: EncodingKey::from_ed_der(der),
             public_x,
+            signing_der: der.to_vec(),
         })
+    }
+
+    /// The PKCS#8 encoding of the signing key, for storing it so that a restart keeps it. Secret.
+    #[must_use]
+    pub fn pkcs8_der(&self) -> &[u8] {
+        &self.signing_der
     }
 
     /// The issuer claim of every token, which Lore is configured to require.
@@ -172,4 +195,24 @@ pub struct NativeAuth {
     /// server refuses plain `http` for an `https` issuer, so use a loopback `http` issuer only
     /// for local evaluation.
     pub jwks_url: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A key stored and reloaded keeps its public half, so tokens from before a restart verify
+    /// after it.
+    #[test]
+    fn a_stored_key_reloads_to_the_same_public_key_set() {
+        let original = CredentialBridge::generate("issuer", "audience").unwrap();
+        let reloaded =
+            CredentialBridge::from_pkcs8_der(original.pkcs8_der(), "issuer", "audience").unwrap();
+        assert_eq!(original.jwks_json(), reloaded.jwks_json());
+    }
+
+    #[test]
+    fn a_key_that_is_not_ed25519_is_refused() {
+        assert!(CredentialBridge::from_pkcs8_der(b"not a key", "i", "a").is_err());
+    }
 }
