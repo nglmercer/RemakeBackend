@@ -139,3 +139,37 @@ identity/access token flags (they are documented as unsafe for secrets on the co
 Not started: the Better Auth session to token minting, the v2 migration, the SDKs and the
 `/api/versioning/v1` routes. These are the remaining stages of the migration; the native-path
 viability question above is the one this spike answers.
+
+## Backend credential issue (Better Auth to native token)
+
+Implemented in `crates/cloud-api/src/versioning.rs`, with migration
+`migrations/20261114000001_versioning_workspaces.sql`:
+
+- `GET /api/versioning/v1/jwks.json`: the public Ed25519 key set the engine verifies against. No
+  private material is published (tested).
+- `POST /api/versioning/v1/native-credentials`: authenticated by the existing `DualUser` extractor
+  (Bearer or cookie, with the same CSRF and origin rules as other routes). It reads the account's
+  live `versioning_workspaces` rows and returns a token valid for 300 seconds, carrying `read` and
+  `write` only on the repositories that account owns. The subject is the Better Auth user id.
+  Rate-limited by the existing upload limiter.
+- Ownership is written only by server-side code (`register_workspace`, `revoke_workspace`). No
+  request can claim a repository. Repository ids are constrained to 32 lowercase hex characters.
+
+Tests (`crates/cloud-api/src/versioning_tests.rs`, six, against real PostgreSQL with real
+Better Auth sessions): unauthenticated requests are refused; the key set is public without a
+private scalar; an owner's token verifies against the published key and carries exactly their
+grant; another account gets no grant on that repository; revocation takes effect on the next
+issue; malformed ids are refused by the table.
+
+Full `cloud-api` run against PostgreSQL 18: the 96 default tests and 113 of the 115 database-gated
+tests pass. The two that fail need environment this machine lacks (a ClamAV daemon and the staging
+package set) and fail on a missing variable, not on behavior.
+
+Not done: the workspace creation flow (the engine is not yet started inside `cloud-api`, so a
+repository cannot be created through the backend); the engine's JWKS fetch from this route; a
+persistent or shared signing key for several instances; revocation of already-issued tokens;
+the v2 migration; the `/api/versioning/v1` repository, reference and commit routes; the SDKs.
+
+Local test database used for the above: a system PostgreSQL 18 cluster started with a short
+socket directory (`-k /tmp/...`, since the default path exceeds the Unix socket length limit
+under a long scratch path), reached with `CLOUD_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:<port>/postgres`.

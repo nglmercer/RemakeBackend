@@ -14,6 +14,7 @@ cloud-contracts = { path = "../cloud-contracts" }
 cloud-storage = { path = "../cloud-storage" }
 cloud-verifier = { path = "../cloud-verifier" }
 cloud-snapshot = { path = "../cloud-snapshot" }
+cloud-versioning = { path = "../cloud-versioning" }
 tempfile = "3"
 base64 = "0.22"
 sha2 = "0.10"

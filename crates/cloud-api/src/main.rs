@@ -41,6 +41,9 @@ mod step_up;
 mod sync;
 mod temporary_log_approval;
 mod uploads;
+mod versioning;
+#[cfg(test)]
+mod versioning_tests;
 mod web;
 mod worker;
 mod worker_daemon;
@@ -70,6 +73,8 @@ use std::{error::Error, sync::Arc};
 
 #[derive(Clone)]
 struct AppState {
+    /// Signs native credentials for the versioning engine. See `versioning`.
+    versioning: Arc<cloud_versioning::bridge::CredentialBridge>,
     peer: remote::peers::PeerConfig,
     auth: AuthContext,
     pool: PgPool,
@@ -1152,7 +1157,9 @@ fn app_inner(
         )
         .merge(cloud_v2::routes())
         .merge(v3_routes())
+        .merge(versioning::routes())
         .with_state(AppState {
+            versioning: versioning::bridge().expect("the versioning credential key"),
             peer: flags.peer,
             auth: context,
             pool,

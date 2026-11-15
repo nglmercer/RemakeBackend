@@ -1405,6 +1405,7 @@ dependencies = [
  "cloud-snapshot",
  "cloud-storage",
  "cloud-verifier",
+ "cloud-versioning",
  "ed25519-dalek 2.2.0",
  "futures-util",
  "hex",
