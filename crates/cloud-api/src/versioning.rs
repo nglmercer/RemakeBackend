@@ -37,20 +37,165 @@ pub const LIFETIME_SECONDS: u64 = 300;
 /// out of user credentials.
 const OWNER_ACTIONS: [&str; 2] = ["read", "write"];
 
-/// The versioning state of this process: the key that signs native tokens, and the engine that
-/// stores repositories when one is configured.
+/// The versioning state of this process: the key that signs native tokens, and the engine once it
+/// has started.
+///
+/// The engine starts after the HTTP listener is serving, because it fetches its verification keys
+/// from this process's own key set at startup. Until it is set, workspace creation answers 503.
 pub struct Versioning {
     pub bridge: Arc<CredentialBridge>,
-    pub engine: Option<Arc<cloud_versioning::VersioningHost>>,
+    engine: std::sync::Mutex<Option<Arc<cloud_versioning::VersioningHost>>>,
 }
 
 impl Versioning {
-    /// Generates the signing key for this process and attaches the engine.
-    pub fn new(engine: Option<Arc<cloud_versioning::VersioningHost>>) -> Result<Self, String> {
-        Ok(Self {
-            bridge: bridge()?,
-            engine,
-        })
+    /// State with the given key and no engine yet.
+    pub fn new(bridge: Arc<CredentialBridge>) -> Self {
+        Self {
+            bridge,
+            engine: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// The running engine, when one has been set.
+    pub fn engine(&self) -> Option<Arc<cloud_versioning::VersioningHost>> {
+        self.engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Records the engine once it has started.
+    pub fn set_engine(&self, host: Arc<cloud_versioning::VersioningHost>) {
+        *self
+            .engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(host);
+    }
+
+    /// Removes the engine so that it can be stopped at shutdown.
+    pub fn take_engine(&self) -> Option<Arc<cloud_versioning::VersioningHost>> {
+        self.engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+}
+
+/// Test state: a fresh key and the given engine, if any.
+#[cfg(test)]
+pub fn for_tests(
+    engine: Option<Arc<cloud_versioning::VersioningHost>>,
+) -> Result<Arc<Versioning>, String> {
+    let state = Versioning::new(bridge()?);
+    if let Some(engine) = engine {
+        state.set_engine(engine);
+    }
+    Ok(Arc::new(state))
+}
+
+/// The state of a process that runs no engine. Workspace creation answers 503 and nothing is
+/// recorded.
+#[cfg(test)]
+pub fn unconfigured() -> Arc<Versioning> {
+    for_tests(None).expect("the versioning credential key")
+}
+
+/// How the engine accepts native clients, read from the environment through `lookup`.
+///
+/// `REMAKE_VERSIONING_NATIVE_LISTEN` names the address the engine's native endpoints bind. It is
+/// off when unset. When it is set, `REMAKE_VERSIONING_JWKS_URL` must name the backend's own key
+/// set, because a native listener that cannot verify tokens would accept every caller. The engine
+/// is configured to require the issuer and audience of `bridge`.
+pub fn native_settings(
+    bridge: &CredentialBridge,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<
+    (
+        Option<std::net::SocketAddr>,
+        Option<cloud_versioning::bridge::NativeAuth>,
+    ),
+    String,
+> {
+    let listen = match lookup("REMAKE_VERSIONING_NATIVE_LISTEN").filter(|v| !v.trim().is_empty()) {
+        None => return Ok((None, None)),
+        Some(value) => value
+            .parse::<std::net::SocketAddr>()
+            .map_err(|_| "REMAKE_VERSIONING_NATIVE_LISTEN must be an address:port".to_string())?,
+    };
+    let jwks_url = lookup("REMAKE_VERSIONING_JWKS_URL")
+        .filter(|v| !v.trim().is_empty())
+        .ok_or_else(|| {
+            "REMAKE_VERSIONING_JWKS_URL is required when the native listener is enabled".to_string()
+        })?;
+    Ok((
+        Some(listen),
+        Some(cloud_versioning::bridge::NativeAuth {
+            issuer: bridge.issuer().to_string(),
+            audience: bridge.audience().to_string(),
+            jwks_url,
+        }),
+    ))
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    fn lookup(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+        move |key| {
+            pairs
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| v.to_string())
+        }
+    }
+
+    #[test]
+    fn the_native_listener_is_off_unless_configured() {
+        let bridge = bridge().unwrap();
+        let (listen, auth) = native_settings(&bridge, lookup(&[])).unwrap();
+        assert!(listen.is_none() && auth.is_none());
+    }
+
+    #[test]
+    fn a_native_listener_requires_the_key_set_it_verifies_against() {
+        let bridge = bridge().unwrap();
+        let error = native_settings(
+            &bridge,
+            lookup(&[("REMAKE_VERSIONING_NATIVE_LISTEN", "127.0.0.1:41337")]),
+        )
+        .unwrap_err();
+        assert!(error.contains("REMAKE_VERSIONING_JWKS_URL"));
+    }
+
+    #[test]
+    fn a_native_listener_verifies_the_bridge_issuer_and_audience() {
+        let bridge = bridge().unwrap();
+        let (listen, auth) = native_settings(
+            &bridge,
+            lookup(&[
+                ("REMAKE_VERSIONING_NATIVE_LISTEN", "127.0.0.1:41337"),
+                (
+                    "REMAKE_VERSIONING_JWKS_URL",
+                    "http://127.0.0.1:3000/api/versioning/v1/jwks.json",
+                ),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(listen.unwrap().port(), 41337);
+        let auth = auth.unwrap();
+        assert_eq!(auth.issuer, ISSUER);
+        assert_eq!(auth.audience, AUDIENCE);
+    }
+
+    #[test]
+    fn a_malformed_listen_address_is_refused() {
+        let bridge = bridge().unwrap();
+        assert!(native_settings(
+            &bridge,
+            lookup(&[("REMAKE_VERSIONING_NATIVE_LISTEN", "not an address")]),
+        )
+        .is_err());
     }
 }
 
@@ -193,8 +338,7 @@ pub async fn create_workspace(
     }
     let engine = state
         .versioning
-        .engine
-        .clone()
+        .engine()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
 
     let id_bytes: [u8; 16] = *uuid::Uuid::new_v4().as_bytes();

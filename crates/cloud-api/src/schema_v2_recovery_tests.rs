@@ -187,9 +187,7 @@ fn retained_migrations(before: &BTreeMap<String, Value>, after: &BTreeMap<String
 }
 fn service_state(auth: &AuthContext, pool: &PgPool) -> AppState {
     AppState {
-        versioning: Arc::new(
-            versioning::Versioning::new(None).expect("the versioning credential key"),
-        ),
+        versioning: versioning::unconfigured(),
         peer: remote::peers::PeerConfig::default(),
         auth: auth.clone(),
         pool: pool.clone(),

@@ -290,7 +290,7 @@ fn step_up_app(
         auth,
         None,
         super::RouterFlags {
-            engine: None,
+            versioning: versioning::unconfigured(),
             peer: crate::remote::peers::PeerConfig::default(),
             trusted_proxy_cidrs: Vec::new(),
             step_up_oauth: oauth,
@@ -525,7 +525,7 @@ async fn temporary_log_codes_are_bound_limited_single_use_and_audited() {
         auth,
         None,
         super::RouterFlags {
-            engine: None,
+            versioning: versioning::unconfigured(),
             peer: crate::remote::peers::PeerConfig::default(),
             trusted_proxy_cidrs: Vec::new(),
             step_up_oauth: None,

@@ -191,3 +191,29 @@ repository, reference and commit routes; the SDKs; the product CLI.
 Local test database used for the above: a system PostgreSQL 18 cluster started with a short
 socket directory (`-k /tmp/...`, since the default path exceeds the Unix socket length limit
 under a long scratch path), reached with `CLOUD_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:<port>/postgres`.
+
+## End-to-end run: backend, Better Auth, native CLI
+
+Verified on a local backend (`cloud-api`, PostgreSQL 18, loopback). Runbook:
+
+1. `DATABASE_URL=postgres://.../remake_e2e target/debug/cloud-api migrate`
+2. Start the backend with `DATABASE_URL`, `AUTH_SECRET` (at least 32 bytes), `APP_ORIGIN=http://127.0.0.1:43000`,
+   `BIND_ADDR=127.0.0.1:43000`, `REMAKE_VERSIONING_DATA_DIR=<persistent dir>`,
+   `REMAKE_VERSIONING_NATIVE_LISTEN=127.0.0.1:43100` and
+   `REMAKE_VERSIONING_JWKS_URL=http://127.0.0.1:43000/api/versioning/v1/jwks.json`.
+3. `python3 scripts/versioning-e2e/handoff_workspace.py owner@example.test "Owner" owner.json`
+   creates the account, the workspace and a 300-second credential.
+4. With the Lore CLI: `lore --identity-token "$TOKEN" --access-token "$TOKEN" clone lore://127.0.0.1:43100/<repositoryId> <dir>`,
+   then `stage --scan`, `commit`, and `push` with the same flags.
+
+Observed: the backend serves JWKS and the engine starts after the listener is up (the engine fetches
+its keys at startup, so the listener must already serve). A workspace is created with the
+authenticated account. A first commit is pushed and a second clone receives identical bytes. A second
+account is refused with "Repository not found", and a request with no credential is refused the same
+way. Two writers from one head produce "Branch has diverged" and neither loses its committed work.
+After a graceful restart the history and bytes survive and the credential issued before the restart
+is refused, since the signing key is per process; a new credential from the same session works.
+
+Not yet covered by this run: a crash during publication and its recovery by operation ID, a
+resumable upload of a large file, a multi-commit offline sequence, a second SDK, the v2 migration,
+and the versioning repository routes.

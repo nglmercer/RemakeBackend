@@ -8574,7 +8574,7 @@ fn providers_app(oauth: Option<step_up::StepUpOAuth>) -> Router {
         auth,
         None,
         super::RouterFlags {
-            engine: None,
+            versioning: versioning::unconfigured(),
             peer: crate::remote::peers::PeerConfig::default(),
             trusted_proxy_cidrs: Vec::new(),
             step_up_oauth: oauth,
