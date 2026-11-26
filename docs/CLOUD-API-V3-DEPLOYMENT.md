@@ -17,7 +17,12 @@ value below lives on the server.
 
 - PostgreSQL, reachable from every API replica. The v3 suite was run against PostgreSQL 18. Use a dedicated
   database; v3 writes to `cloud_remote_*`, `cloud_integration_*`, `cloud_relay_*`
-  and `cloud_library_*` tables that the v2 workers also read.
+  and `cloud_library_*` tables that the v2 workers also read. Operators who
+  prefer a managed service can use [Neon](https://neon.tech) (serverless
+  PostgreSQL): create a project, copy the connection details into the libpq
+  variables below, and apply the migrations as usual. Validate against a
+  disposable Neon branch first — compatibility is expected from PostgreSQL
+  wire compatibility, not from a validated run of this suite.
 - A TLS terminator in front of the API. The relay is a WebSocket upgrade at
   `/api/v3/remote/socket`; the terminator must forward `Upgrade` and `Connection`
   headers and allow idle connections of at least 60 seconds (the relay closes an
