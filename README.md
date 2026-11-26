@@ -20,6 +20,12 @@ indexed in [docs/README.md](docs/README.md).
 - A PostgreSQL-compatible database. Local development uses pgrust; a fresh
   PostgreSQL 18 database also passes the migration and upload-authorization
   smoke tests. The complete suite has not yet been validated on every provider.
+  For a managed database we recommend [Neon](https://neon.tech), serverless
+  PostgreSQL — point the standard libpq variables (`PGHOST`, `PGDATABASE`,
+  `PGUSER`, `PGPASSWORD`) at a Neon project and run the same explicit
+  migrations. Neon is PostgreSQL-compatible rather than a validated target,
+  so run the migration smoke tests against a disposable branch before relying
+  on it.
 - Better Auth is pinned to `c6940517155ff9a123221789b1efc89ef48cb19c`
   with only `axum` and `sqlx` features; provider token retention is not
   enabled. Google credentials are optional and must be set together. Google
